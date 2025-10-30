@@ -30,10 +30,13 @@ app.use(express.json());
 app.use(cookieParser());
 
 // DB
-mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/type-race', {
-  // @ts-expect-error mongoose connection options compatible
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
+const mongoUri = process.env.MONGODB_URI || 'mongodb://localhost:27017/type-race';
+mongoose.connect(mongoUri);
+mongoose.connection.on('connected', () => {
+  console.log('Connected to MongoDB');
+});
+mongoose.connection.on('error', (err) => {
+  console.error('MongoDB connection error:', err);
 });
 
 // Schemas & Models
@@ -231,11 +234,11 @@ const JWT_SECRET = process.env.JWT_SECRET || 'dev_secret_change_me';
 const COOKIE_NAME = process.env.COOKIE_NAME || 'auth_token';
 const COOKIE_OPTS = { httpOnly: true, sameSite: 'lax' as const, secure: false };
 
-function signJwt(payload: { userId: string; username: string }) {
+const signJwt = (payload: { userId: string; username: string }) => {
   return jwt.sign(payload, JWT_SECRET, { expiresIn: '7d' });
 }
 
-function authRequired(req: Request, res: Response, next: NextFunction) {
+const authRequired = (req: Request, res: Response, next: NextFunction) => {
   const token = (req.cookies?.[COOKIE_NAME]) as string | undefined;
   if (!token) return res.status(401).json({ error: 'Unauthorized' });
   try {
@@ -257,8 +260,87 @@ type ActiveRace = {
 };
 
 const activeRaces = new Map<string, ActiveRace>();
-const waitingPlayers = new Map<string, { socketId: string; userId: string; username: string; joinedAt: number }>();
+const waitingPlayers = new Map<string, { socketId: string; userId: string; username: string; joinedAt: number; isBot?: boolean; botTargetWpm?: number }>();
 const botIntervals = new Map<string, NodeJS.Timeout[]>();
+let lobbyBotSeedTimer: NodeJS.Timeout | null = null;
+let lobbyBotAddInterval: NodeJS.Timeout | null = null;
+
+// Queue settings and countdown state
+const MIN_PLAYERS = 3; // countdown allowed at 3+
+const MAX_PLAYERS = 5; // cap lobby at 5 (fill with bots after start if needed)
+const COUNTDOWN_MS = 2000; // 2s countdown when threshold met
+const RACE_START_GRACE_MS = 2000; // extra modal countdown on race page
+const BOT_START_DELAY_MS = 1000; // bots start 1s after countdown ends
+let waitingCountdownTimer: NodeJS.Timeout | null = null;
+let countdownEndsAt: number | null = null;
+
+const broadcastWaitingState = () => {
+  const players = Array.from(waitingPlayers.values()).map(p => ({ username: p.username, socketId: p.socketId }));
+  io.emit('waiting-state', { players, count: players.length, countdownEndsAt });
+}
+
+const maybeStartWaitingCountdown = () => {
+  if (waitingPlayers.size < MIN_PLAYERS) return;
+  if (waitingCountdownTimer) return; // already counting down
+  countdownEndsAt = Date.now() + COUNTDOWN_MS;
+  io.emit('race-starting', { startsInMs: COUNTDOWN_MS });
+  broadcastWaitingState();
+  waitingCountdownTimer = setTimeout(() => {
+    waitingCountdownTimer = null;
+    countdownEndsAt = null;
+    startRace();
+  }, COUNTDOWN_MS);
+}
+
+async function computeBaselineWpm(): Promise<number> {
+  try {
+    const humanUsers = Array.from(waitingPlayers.values()).filter(p => !p.isBot);
+    if (humanUsers.length === 0) return 50;
+    const ids = humanUsers.map(h => h.userId).filter(Boolean);
+    const users = await User.find({ _id: { $in: ids } }).select('bestWpm');
+    const arr = users.map(u => (u.bestWpm || 0)).filter(n => n > 0);
+    const avg = arr.length ? Math.round(arr.reduce((a, b) => a + b, 0) / arr.length) : 50;
+    return Math.max(30, Math.min(120, avg));
+  } catch {
+    return 50;
+  }
+}
+
+function cancelLobbyBotTimers() {
+  if (lobbyBotSeedTimer) { clearTimeout(lobbyBotSeedTimer); lobbyBotSeedTimer = null; }
+  if (lobbyBotAddInterval) { clearInterval(lobbyBotAddInterval); lobbyBotAddInterval = null; }
+}
+
+async function startLobbyBotSeeding() {
+  cancelLobbyBotTimers();
+  lobbyBotSeedTimer = setTimeout(async () => {
+    // Add one bot at a time until 5 players in lobby
+    cancelLobbyBotTimers();
+    lobbyBotAddInterval = setInterval(async () => {
+      const total = waitingPlayers.size;
+      if (total >= MAX_PLAYERS) {
+        cancelLobbyBotTimers();
+        // quick start if full
+        if (waitingCountdownTimer) { clearTimeout(waitingCountdownTimer); waitingCountdownTimer = null; }
+        countdownEndsAt = Date.now() + 1000;
+        io.emit('race-starting', { startsInMs: 1000 });
+        broadcastWaitingState();
+        waitingCountdownTimer = setTimeout(() => { waitingCountdownTimer = null; countdownEndsAt = null; startRace(); }, 1000);
+        return;
+      }
+      // Only seed if there is at least one human waiting
+      const hasHuman = Array.from(waitingPlayers.values()).some(p => !p.isBot);
+      if (!hasHuman) { cancelLobbyBotTimers(); return; }
+      const baseline = await computeBaselineWpm();
+      const variance = (Math.random() - 0.5) * 0.3; // +-15%
+      const target = Math.round(Math.max(25, Math.min(140, baseline * (1 + variance))));
+      const botId = `bot_wait_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+      waitingPlayers.set(botId, { socketId: botId, userId: '0', username: `Bot_${Math.floor(Math.random() * 900) + 100}`, joinedAt: Date.now(), isBot: true, botTargetWpm: target });
+      broadcastWaitingState();
+      // If we just reached cap, the next loop iteration will trigger start
+    }, 700);
+  }, 2000);
+}
 
 // Socket
 io.on('connection', (socket: Socket) => {
@@ -273,7 +355,28 @@ io.on('connection', (socket: Socket) => {
       if (!user) return;
       waitingPlayers.set(socket.id, { socketId: socket.id, userId: (user._id as Types.ObjectId).toString(), username: userData.username, joinedAt: Date.now() });
       socket.emit('waiting-status', { message: 'Хүлээж байна...', playersInQueue: waitingPlayers.size });
-      if (waitingPlayers.size >= 2) startRace();
+      broadcastWaitingState();
+      // Start seeding bots for lobby after 2s if not already
+      if (!lobbyBotSeedTimer && !lobbyBotAddInterval) {
+        await startLobbyBotSeeding();
+      }
+      // If room is full, start quickly; else start countdown only if threshold met
+      if (waitingPlayers.size >= MAX_PLAYERS) {
+        if (waitingCountdownTimer) {
+          clearTimeout(waitingCountdownTimer);
+          waitingCountdownTimer = null;
+        }
+        countdownEndsAt = Date.now() + 1000; // 1s grace before start
+        io.emit('race-starting', { startsInMs: 1000 });
+        broadcastWaitingState();
+        waitingCountdownTimer = setTimeout(() => {
+          waitingCountdownTimer = null;
+          countdownEndsAt = null;
+          startRace();
+        }, 1000);
+      } else if (waitingPlayers.size >= MIN_PLAYERS) {
+        maybeStartWaitingCountdown();
+      }
     } catch {
       socket.emit('error', { message: 'Алдаа гарлаа' });
     }
@@ -355,7 +458,16 @@ io.on('connection', (socket: Socket) => {
   });
 
   socket.on('disconnect', () => {
-    waitingPlayers.delete(socket.id);
+    const removed = waitingPlayers.delete(socket.id);
+    if (removed) {
+      // If lobby empties, cancel countdown
+      if (waitingPlayers.size === 0) {
+        if (waitingCountdownTimer) { clearTimeout(waitingCountdownTimer); waitingCountdownTimer = null; }
+        countdownEndsAt = null;
+        cancelLobbyBotTimers();
+      }
+      broadcastWaitingState();
+    }
     for (const [raceId, race] of activeRaces) {
       const idx = race.players.findIndex(p => p.socketId === socket.id);
       if (idx !== -1) {
@@ -372,7 +484,9 @@ io.on('connection', (socket: Socket) => {
 });
 
 function startRace() {
-  const players = Array.from(waitingPlayers.values()).slice(0, 4);
+  const lobby = Array.from(waitingPlayers.values()).slice(0, MAX_PLAYERS);
+  const humanPlayers = lobby.filter(p => !p.isBot);
+  const lobbyBots = lobby.filter(p => p.isBot);
   const raceId = `race_${Date.now()}`;
   const texts = [
     'Монгол улс нь төв Азид орших бүрэн эрхт улс юм. Энэ улс нь маш том газар нутагтай бөгөөд хүн ам нь цөөхөн байдаг.',
@@ -385,40 +499,116 @@ function startRace() {
   const race: ActiveRace = {
     id: raceId,
     text: selectedText,
-    players: players.map(p => ({ ...p, progress: 0, currentWpm: 0, wpm: 0, accuracy: 0, time: 0, errors: 0, finished: false })),
+    players: humanPlayers.map(p => ({ ...p, progress: 0, currentWpm: 0, wpm: 0, accuracy: 0, time: 0, errors: 0, finished: false })),
     status: 'active',
     startTime: Date.now(),
   };
   activeRaces.set(raceId, race);
-  players.forEach(p => {
+  // Insert lobby bots into race with their existing IDs and start their timers
+  if (lobbyBots.length > 0) {
+    const words = selectedText.split(' ').length;
+    lobbyBots.forEach(b => {
+      const accuracy = Math.floor(92 + Math.random() * 7);
+      const target = Math.max(25, Math.min(140, Math.round(b.botTargetWpm || 50)));
+      const botPlayer: RacePlayer & { socketId: string } = {
+        userId: '0',
+        username: b.username,
+        wpm: 0,
+        accuracy,
+        time: 0,
+        errors: 0,
+        finished: false,
+        socketId: b.socketId,
+        progress: 0,
+        currentWpm: 0,
+        isBot: true,
+      };
+      race.players.push(botPlayer);
+      // do not start typing yet; will start after grace
+    });
+  }
+
+  humanPlayers.forEach(p => {
     const s = io.sockets.sockets.get(p.socketId);
     if (s) {
       s.join(raceId);
       s.emit('race-started', {
         raceId,
         text: selectedText,
-        players: race.players.map(pl => ({ username: pl.username, socketId: pl.socketId }))
+        players: race.players.map(pl => ({ username: pl.username, socketId: pl.socketId })),
+        startsInMs: RACE_START_GRACE_MS
       });
     }
   });
-  players.forEach(p => waitingPlayers.delete(p.socketId));
+  lobby.forEach(p => waitingPlayers.delete(p.socketId));
 
-  // Fill with bots if needed (target 4 players)
-  const minPlayers = 4;
-  const need = Math.max(0, minPlayers - race.players.length);
-  if (need > 0) {
-    addBotsToRace(raceId, need);
+  if (lobbyBots.length === 0) {
+    // If no bots present but humans < 4, optionally fill to 4 with defaults
+    const minPlayers = 4;
+    const need = Math.max(0, minPlayers - race.players.length);
+    if (need > 0) {
+      // delay filler bots until grace completes, then start them after bot delay
+      setTimeout(() => addBotsToRace(raceId, need, undefined, BOT_START_DELAY_MS), RACE_START_GRACE_MS);
+    }
   }
+
+  // Delay starting lobby bots until grace completes; also align race startTime
+  setTimeout(() => {
+    const current = activeRaces.get(raceId);
+    if (!current) return;
+    current.startTime = Date.now();
+    // bots pushed earlier with startBotTyping already if lobbyBots.length>0
+    if (lobbyBots.length > 0) {
+      // timers are started in the insertion above; but we delayed them. We must actually start them now
+      // Recreate timers for lobby bots now (ensure progress stays at 0 until now)
+      const words = selectedText.split(' ').length;
+      current.players.filter(p => (p as any).isBot).forEach((bp: any) => {
+        // only start if not already moving
+        if (!bp.finished && (bp.progress || 0) === 0) {
+          const acc = Math.floor(92 + Math.random() * 7);
+          const target = Math.max(25, Math.min(140, Math.round((bp.currentWpm || (bp.botTargetWpm || 50)) )));
+          setTimeout(() => startBotTyping(raceId, bp, words, target, acc), BOT_START_DELAY_MS);
+        }
+      });
+    }
+  }, RACE_START_GRACE_MS);
 }
 
-function addBotsToRace(raceId: string, count: number) {
+function startBotTyping(raceId: string, botPlayer: RacePlayer & { socketId: string; isBot?: boolean }, wordsCount: number, targetWpm: number, accuracy: number) {
+  const timers: NodeJS.Timeout[] = botIntervals.get(raceId) || [];
+  let typedWords = 0;
+  const tickMs = 500;
+  const wps = targetWpm / 60;
+  const timer = setInterval(() => {
+    const currentRace = activeRaces.get(raceId);
+    if (!currentRace) { clearInterval(timer); return; }
+    const variance = (Math.random() - 0.5) * 0.2 * wps;
+    typedWords += Math.max(0, (wps + variance) * (tickMs / 1000));
+    const progress = Math.min(100, (typedWords / wordsCount) * 100);
+    botPlayer.progress = progress;
+    botPlayer.currentWpm = Math.round((typedWords / (Math.max(1, (Date.now() - currentRace.startTime)) / 60000)));
+    io.to(raceId).emit('player-progress', { playerId: botPlayer.socketId, progress, wpm: botPlayer.currentWpm });
+    if (progress >= 100) {
+      clearInterval(timer);
+      botPlayer.finished = true;
+      botPlayer.wpm = Math.round(targetWpm + (Math.random() - 0.5) * 6);
+      botPlayer.time = (Date.now() - currentRace.startTime) / 1000;
+      botPlayer.errors = Math.floor((1 - accuracy / 100) * wordsCount * 0.2);
+      const allFinished = currentRace.players.every(p => p.finished);
+      if (allFinished) finalizeRace(raceId);
+    }
+  }, tickMs);
+  timers.push(timer);
+  botIntervals.set(raceId, timers);
+}
+
+function addBotsToRace(raceId: string, count: number, targetWpms?: number[], startDelayMs: number = 0) {
   const race = activeRaces.get(raceId);
   if (!race) return;
   const words = race.text.split(' ').length;
-  const timers: NodeJS.Timeout[] = [];
   for (let i = 0; i < count; i++) {
     const botId = `bot_${raceId}_${i}`;
-    const targetWpm = Math.floor(35 + Math.random() * 45); // 35-80 WPM
+    const targetWpm = targetWpms && targetWpms[i] != null ? targetWpms[i] : Math.floor(35 + Math.random() * 45); // default 35-80 WPM
     const accuracy = Math.floor(92 + Math.random() * 7); // 92-99%
     const botPlayer: RacePlayer & { socketId: string } = {
       userId: '0',
@@ -434,41 +624,10 @@ function addBotsToRace(raceId: string, count: number) {
       isBot: true,
     };
     race.players.push(botPlayer);
-    // Notify clients about bot
+    // Notify clients about bot initial state
     io.to(raceId).emit('player-progress', { playerId: botId, progress: 0, wpm: 0 });
-
-    // Simulate typing
-    let typedWords = 0;
-    const tickMs = 500;
-    const wps = targetWpm / 60;
-    const timer = setInterval(async () => {
-      const currentRace = activeRaces.get(raceId);
-      if (!currentRace) { clearInterval(timer); return; }
-      // Small variance
-      const variance = (Math.random() - 0.5) * 0.2 * wps;
-      typedWords += Math.max(0, (wps + variance) * (tickMs / 1000));
-      const progress = Math.min(100, (typedWords / words) * 100);
-      botPlayer.progress = progress;
-      botPlayer.currentWpm = Math.round((typedWords / (Math.max(1, (Date.now() - currentRace.startTime)) / 60000)));
-      io.to(raceId).emit('player-progress', { playerId: botId, progress, wpm: botPlayer.currentWpm });
-      if (progress >= 100) {
-        clearInterval(timer);
-        botPlayer.finished = true;
-        botPlayer.wpm = Math.round(targetWpm + (Math.random() - 0.5) * 6);
-        botPlayer.time = (Date.now() - currentRace.startTime) / 1000;
-        botPlayer.errors = Math.floor((1 - accuracy / 100) * words * 0.2);
-        // Check completion like humans do: reuse end logic by emitting server-side
-        const allFinished = currentRace.players.every(p => p.finished);
-        if (allFinished) {
-          // Trigger same path as race-complete aggregated end
-          // Build rankings and emit end by calling helper
-          finalizeRace(raceId);
-        }
-      }
-    }, tickMs);
-    timers.push(timer);
+    setTimeout(() => startBotTyping(raceId, botPlayer, words, targetWpm, accuracy), Math.max(0, startDelayMs));
   }
-  botIntervals.set(raceId, timers);
 }
 
 async function finalizeRace(raceId: string) {
