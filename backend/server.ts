@@ -52,6 +52,9 @@ interface UserDoc extends Document {
   bestWpm: number;
   totalRaces: number;
   averageAccuracy: number;
+  equipped?: { carSku?: string; skinSku?: string };
+  friends?: Types.ObjectId[];
+  teamId?: Types.ObjectId | null;
   createdAt: Date;
 }
 
@@ -67,6 +70,9 @@ const UserSchema = new Schema<UserDoc>({
   bestWpm: { type: Number, default: 0 },
   totalRaces: { type: Number, default: 0 },
   averageAccuracy: { type: Number, default: 0 },
+  equipped: { type: Object, default: {} },
+  friends: { type: [Schema.Types.ObjectId], ref: 'User', default: [] },
+  teamId: { type: Schema.Types.ObjectId, ref: 'Team', default: null },
   createdAt: { type: Date, default: Date.now }
 });
 
@@ -188,6 +194,23 @@ const Transaction: Model<TransactionDoc> = mongoose.model('Transaction', Transac
 const TaskClaim: Model<TaskClaimDoc> = mongoose.model('TaskClaim', TaskClaimSchema);
 const AchievementUnlock: Model<AchievementUnlockDoc> = mongoose.model('AchievementUnlock', AchievementUnlockSchema);
 
+// Teams
+interface TeamDoc extends Document {
+  name: string;
+  ownerId: Types.ObjectId;
+  members: Types.ObjectId[];
+  createdAt: Date;
+}
+
+const TeamSchema = new Schema<TeamDoc>({
+  name: { type: String, required: true },
+  ownerId: { type: Schema.Types.ObjectId, ref: 'User', index: true },
+  members: [{ type: Schema.Types.ObjectId, ref: 'User' }],
+  createdAt: { type: Date, default: Date.now }
+});
+
+const Team: Model<TeamDoc> = mongoose.model('Team', TeamSchema);
+
 // Season
 interface SeasonDoc extends Document {
   seasonId: string;
@@ -250,6 +273,27 @@ const authRequired = (req: Request, res: Response, next: NextFunction) => {
   }
 }
 
+// Leveling helpers - infinite progressive curve
+// XP required to go from (level) -> (level + 1)
+function xpForLevel(level: number): number {
+  const base = 100; // base XP for level 1 -> 2
+  const growth = 1.15; // 15% harder each level
+  return Math.round(base * Math.pow(growth, Math.max(0, level - 1)));
+}
+
+function computeLevelProgress(totalExp: number): { level: number; expInLevel: number; nextLevelXp: number } {
+  let level = 1;
+  let remaining = Math.max(0, Math.floor(totalExp || 0));
+  while (true) {
+    const need = xpForLevel(level);
+    if (remaining < need) {
+      return { level, expInLevel: remaining, nextLevelXp: need };
+    }
+    remaining -= need;
+    level += 1;
+  }
+}
+
 // Game state
 type ActiveRace = {
   id: string;
@@ -260,7 +304,7 @@ type ActiveRace = {
 };
 
 const activeRaces = new Map<string, ActiveRace>();
-const waitingPlayers = new Map<string, { socketId: string; userId: string; username: string; joinedAt: number; isBot?: boolean; botTargetWpm?: number }>();
+const waitingPlayers = new Map<string, { socketId: string; userId: string; username: string; joinedAt: number; isBot?: boolean; botTargetWpm?: number; imageUrl?: string }>();
 const botIntervals = new Map<string, NodeJS.Timeout[]>();
 let lobbyBotSeedTimer: NodeJS.Timeout | null = null;
 let lobbyBotAddInterval: NodeJS.Timeout | null = null;
@@ -274,8 +318,19 @@ const BOT_START_DELAY_MS = 1000; // bots start 1s after countdown ends
 let waitingCountdownTimer: NodeJS.Timeout | null = null;
 let countdownEndsAt: number | null = null;
 
+async function resolveCarImageUrl(userId: string): Promise<string | undefined> {
+  try {
+    const user = await User.findById(userId).select('equipped');
+    const carSku = (user as any)?.equipped?.carSku || 'car.basic';
+    const item = await ShopItem.findOne({ sku: carSku }).select('meta');
+    return (item as any)?.meta?.image;
+  } catch {
+    return undefined;
+  }
+}
+
 const broadcastWaitingState = () => {
-  const players = Array.from(waitingPlayers.values()).map(p => ({ username: p.username, socketId: p.socketId }));
+  const players = Array.from(waitingPlayers.values()).map(p => ({ username: p.username, socketId: p.socketId, imageUrl: (p as any).imageUrl }));
   io.emit('waiting-state', { players, count: players.length, countdownEndsAt });
 }
 
@@ -342,18 +397,46 @@ async function startLobbyBotSeeding() {
   }, 2000);
 }
 
+// Socket authentication middleware
+io.use(async (socket, next) => {
+  try {
+    const token = socket.handshake.auth.token;
+    if (token) {
+      const decoded = jwt.verify(token, JWT_SECRET) as { userId: string; username: string };
+      (socket as any).userId = decoded.userId;
+      (socket as any).authenticatedUsername = decoded.username;
+    }
+    next();
+  } catch {
+    next();
+  }
+});
+
 // Socket
 io.on('connection', (socket: Socket) => {
   // Join waiting room
   socket.on('join-waiting', async (userData: { username: string }) => {
     try {
-      const user = await User.findOneAndUpdate(
-        { username: userData.username },
-        { username: userData.username, $inc: { totalRaces: 1 } },
-        { upsert: true, new: true }
-      );
+      let user: any;
+      const authenticatedUserId = (socket as any).userId;
+      
+      // If user is authenticated, use their account
+      if (authenticatedUserId) {
+        user = await User.findById(authenticatedUserId);
+      } else {
+        // Guest user - create/find by username (don't increment totalRaces here, it happens on race completion)
+        user = await User.findOneAndUpdate(
+          { username: userData.username },
+          { username: userData.username },
+          { upsert: true, new: true }
+        );
+      }
+      
       if (!user) return;
-      waitingPlayers.set(socket.id, { socketId: socket.id, userId: (user._id as Types.ObjectId).toString(), username: userData.username, joinedAt: Date.now() });
+      const userId = (user._id as Types.ObjectId).toString();
+      const imageUrl = await resolveCarImageUrl(userId);
+      waitingPlayers.set(socket.id, { socketId: socket.id, userId, username: user.username || userData.username, joinedAt: Date.now(), imageUrl });
+      console.log(`[USER JOINED] Username: ${user.username}, UserID: ${userId}, Authenticated: ${!!authenticatedUserId}`);
       socket.emit('waiting-status', { message: 'Хүлээж байна...', playersInQueue: waitingPlayers.size });
       broadcastWaitingState();
       // Start seeding bots for lobby after 2s if not already
@@ -397,6 +480,9 @@ io.on('connection', (socket: Socket) => {
   socket.on('race-complete', async (data: { raceId: string; wpm: number; accuracy: number; time: number; errors: number }) => {
     const race = activeRaces.get(data.raceId);
     if (!race) return;
+    
+    // Find and update the player who just finished
+    let finishedPlayer: RacePlayer | undefined;
     race.players.forEach(player => {
       if (player.socketId === socket.id) {
         player.wpm = data.wpm;
@@ -404,53 +490,131 @@ io.on('connection', (socket: Socket) => {
         player.time = data.time;
         player.errors = data.errors;
         player.finished = true;
+        finishedPlayer = player;
       }
     });
+
+    // Award coins and XP immediately to the player who just finished
+    if (finishedPlayer && !(finishedPlayer as any).isBot) {
+      const baseExp = Math.max(5, Math.floor((finishedPlayer.wpm || 0) / 2));
+      const baseCoins = Math.max(10, Math.floor(finishedPlayer.wpm || 0));
+      
+      // Persist to DB immediately
+      (async () => {
+        try {
+          const updated = await User.findByIdAndUpdate(
+            finishedPlayer!.userId,
+            { 
+              $max: { bestWpm: finishedPlayer!.wpm || 0 }, 
+              $inc: { totalRaces: 1, exp: baseExp, money: baseCoins } 
+            },
+            { new: true }
+          );
+          
+          let levelsGained = 0;
+          if (updated) {
+            const beforeLevel = updated.level || 1;
+            const { level: newLevel } = computeLevelProgress(updated.exp || 0);
+            if (newLevel > beforeLevel) {
+              levelsGained = newLevel - beforeLevel;
+              updated.level = newLevel;
+              await updated.save();
+            }
+          }
+          
+          await Transaction.create({ 
+            userId: new Types.ObjectId(finishedPlayer!.userId), 
+            type: 'reward', 
+            amount: baseCoins, 
+            currency: 'coins' 
+          });
+          
+          // Notify player immediately about their rewards
+          io.to(socket.id).emit('player-finished-reward', { 
+            coins: baseCoins, 
+            exp: baseExp, 
+            levelUp: levelsGained 
+          });
+          io.to(socket.id).emit('economy-updated');
+        } catch (err) {
+          console.error('Error awarding immediate reward:', err);
+        }
+      })();
+    }
+
     const allFinished = race.players.every(p => p.finished);
     if (!allFinished) return;
     const rankings = [...race.players]
       .sort((a, b) => b.wpm - a.wpm)
       .map((p, index) => ({ ...p, rank: index + 1 }));
 
-    const raceRecord = new Race({
-      players: race.players.map(p => ({ userId: p.userId, username: p.username, wpm: p.wpm, accuracy: p.accuracy, time: p.time, errors: p.errors, finished: p.finished })),
-      text: race.text,
-      status: 'finished'
-    });
-    await raceRecord.save();
-
-    for (const player of race.players) {
-      if ((player as any).isBot) continue;
-      const baseExp = Math.max(5, Math.floor(player.wpm / 2));
-      const placeBonus = Math.max(0, 20 - (rankings.find(r => r.socketId === player.socketId)?.rank || 4) * 5);
-      const expGain = baseExp + placeBonus;
-      const coinsGain = Math.max(10, Math.floor(player.wpm));
-      const updated = await User.findByIdAndUpdate(
-        player.userId,
-        { $max: { bestWpm: player.wpm }, $inc: { totalRaces: 1, exp: expGain, money: coinsGain } },
-        { new: true }
-      );
-      if (updated) {
-        const levelsGained = Math.floor(updated.exp / 100) - (updated.level - 1);
-        if (levelsGained > 0) { updated.level += levelsGained; await updated.save(); }
-      }
-      await Transaction.create({ userId: new Types.ObjectId(player.userId), type: 'reward', amount: coinsGain, currency: 'coins' });
-    }
-
-    const winner = rankings[0];
-    if (winner && (winner as any).userId && !(winner as any).isBot) {
-      await User.findByIdAndUpdate((winner as any).userId, { $inc: { wins: 1 } });
-    }
-
-    // MMR adjustments
-    for (const r of rankings) {
-      if ((r as any).isBot) continue;
-      const delta = calcMmrDelta((r as any).rank as number, rankings.length, (r as any).wpm as number);
-      await User.findByIdAndUpdate((r as any).userId, { $inc: { mmr: delta } });
-    }
-
+    // Don't send rewards in race-results - they were already awarded immediately when each player finished
+    // Just send the rankings for display
     io.to(data.raceId).emit('race-results', { rankings });
-    // Cleanup bot timers
+
+    // Persist race and award placement bonuses in background (base rewards already awarded)
+    (async () => {
+      try {
+        const raceRecord = new Race({
+          players: race.players.map(p => ({ userId: p.userId, username: p.username, wpm: p.wpm, accuracy: p.accuracy, time: p.time, errors: p.errors, finished: p.finished })),
+          text: race.text,
+          status: 'finished'
+        });
+        await raceRecord.save();
+        console.log(`[RACE SAVED] ID: ${raceRecord._id}, Players: ${race.players.map((p: any) => `${p.username}(${p.userId})`).join(', ')}`);
+
+        const userUpdates: Promise<any>[] = [];
+        for (const player of race.players) {
+          if ((player as any).isBot) continue;
+          const rank = rankings.find(r => r.socketId === player.socketId)?.rank || 999;
+          const placeBonus = Math.max(0, 20 - rank * 5);
+          
+          // Award placement bonus only (base coins/exp already given when they finished)
+          if (placeBonus > 0) {
+            userUpdates.push((async () => {
+              const updated = await User.findByIdAndUpdate(
+                player.userId,
+                { $inc: { exp: placeBonus } },
+                { new: true }
+              );
+              
+              let levelsGained = 0;
+              if (updated) {
+                const beforeLevel = updated.level || 1;
+                const { level: newLevel } = computeLevelProgress(updated.exp || 0);
+                if (newLevel > beforeLevel) {
+                  levelsGained = newLevel - beforeLevel;
+                  updated.level = newLevel;
+                  await updated.save();
+                }
+              }
+              
+              // Notify about placement bonus
+              try { 
+                io.to(player.socketId!).emit('placement-bonus', { exp: placeBonus, levelUp: levelsGained });
+                io.to(player.socketId!).emit('economy-updated'); 
+              } catch {}
+            })());
+          }
+        }
+
+        // Winner wins++ and MMR adjustments
+        const winner = rankings[0];
+        if (winner && (winner as any).userId && !(winner as any).isBot) {
+          userUpdates.push(User.findByIdAndUpdate((winner as any).userId, { $inc: { wins: 1 } }));
+        }
+        for (const r of rankings) {
+          if ((r as any).isBot) continue;
+          const delta = calcMmrDelta((r as any).rank as number, rankings.length, (r as any).wpm as number);
+          userUpdates.push(User.findByIdAndUpdate((r as any).userId, { $inc: { mmr: delta } }));
+        }
+        await Promise.allSettled(userUpdates);
+      } catch (err) {
+        console.error('[RACE SAVE ERROR]', err);
+      }
+    })();
+
+    // Cleanup timers and race state immediately
     const timers = botIntervals.get(data.raceId) || [];
     timers.forEach(t => clearInterval(t));
     botIntervals.delete(data.raceId);
@@ -483,7 +647,7 @@ io.on('connection', (socket: Socket) => {
   });
 });
 
-function startRace() {
+async function startRace() {
   const lobby = Array.from(waitingPlayers.values()).slice(0, MAX_PLAYERS);
   const humanPlayers = lobby.filter(p => !p.isBot);
   const lobbyBots = lobby.filter(p => p.isBot);
@@ -528,18 +692,19 @@ function startRace() {
     });
   }
 
-  humanPlayers.forEach(p => {
+  for (const p of humanPlayers) {
     const s = io.sockets.sockets.get(p.socketId);
     if (s) {
       s.join(raceId);
+      const playersPayload = await Promise.all(race.players.map(async (pl: any) => ({ username: pl.username, socketId: pl.socketId, imageUrl: pl.isBot ? undefined : (await resolveCarImageUrl(pl.userId)) })));
       s.emit('race-started', {
         raceId,
         text: selectedText,
-        players: race.players.map(pl => ({ username: pl.username, socketId: pl.socketId })),
+        players: playersPayload,
         startsInMs: RACE_START_GRACE_MS
       });
     }
-  });
+  }
   lobby.forEach(p => waitingPlayers.delete(p.socketId));
 
   if (lobbyBots.length === 0) {
@@ -653,8 +818,10 @@ async function finalizeRace(raceId: string) {
       status: 'finished'
     });
     await raceRecord.save();
+    console.log(`[RACE FINALIZED] ID: ${raceRecord._id}, Players: ${race.players.map((p: any) => `${p.username}(${p.userId})`).join(', ')}`);
 
     // Economy updates (skip bots)
+    const rewardsMap = new Map<string, { coins: number; exp: number; levelUp: number }>();
     for (const player of race.players) {
       if ((player as any).isBot) continue;
       const baseExp = Math.max(5, Math.floor((player.wpm || 0) / 2));
@@ -666,14 +833,18 @@ async function finalizeRace(raceId: string) {
         { $max: { bestWpm: player.wpm || 0 }, $inc: { totalRaces: 1, exp: expGain, money: coinsGain } },
         { new: true }
       );
+      let levelsGained = 0;
       if (updated) {
-        const levelsGained = Math.floor((updated.exp || 0) / 100) - ((updated.level || 1) - 1);
-        if (levelsGained > 0) {
-          updated.level = (updated.level || 1) + levelsGained;
+        const beforeLevel = updated.level || 1;
+        const { level: newLevel } = computeLevelProgress(updated.exp || 0);
+        if (newLevel > beforeLevel) {
+          levelsGained = newLevel - beforeLevel;
+          updated.level = newLevel;
           await updated.save();
         }
       }
       await Transaction.create({ userId: new Types.ObjectId((player as any).userId), type: 'reward', amount: coinsGain, currency: 'coins' });
+      rewardsMap.set(player.socketId, { coins: coinsGain, exp: expGain, levelUp: levelsGained });
     }
 
     // Winner wins++ (skip bots)
@@ -688,11 +859,17 @@ async function finalizeRace(raceId: string) {
       const delta = calcMmrDelta((r as any).rank as number, rankings.length, (r as any).wpm as number);
       await User.findByIdAndUpdate((r as any).userId, { $inc: { mmr: delta } });
     }
-  } catch {
-    // ignore persistence errors in finalize path to ensure race closes
-  }
 
-  io.to(raceId).emit('race-results', { rankings });
+    const rankingsWithRewards = rankings.map(r => {
+      const rewards = rewardsMap.get(r.socketId) || { coins: 0, exp: 0, levelUp: 0 };
+      return { ...r, rewards };
+    });
+    io.to(raceId).emit('race-results', { rankings: rankingsWithRewards });
+  } catch (err) {
+    console.error('[FINALIZE RACE ERROR]', err);
+    // ignore persistence errors in finalize path to ensure race closes
+    io.to(raceId).emit('race-results', { rankings });
+  }
   // Cleanup timers
   const timers = botIntervals.get(raceId) || [];
   timers.forEach(t => clearInterval(t));
@@ -705,31 +882,46 @@ app.post('/api/auth/signup', async (req: Request, res: Response) => {
   try {
     const { email, username, password } = (req.body || {}) as { email?: string; username?: string; password?: string };
     if (!email || !username || !password) return res.status(400).json({ error: 'Missing fields' });
+    if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
+    
     const existing = await User.findOne({ $or: [{ email }, { username }] });
-    if (existing) return res.status(409).json({ error: 'Email or username taken' });
+    if (existing) {
+      if (existing.email === email) return res.status(409).json({ error: 'Email already taken' });
+      if (existing.username === username) return res.status(409).json({ error: 'Username already taken' });
+    }
+    
     const passwordHash = await bcrypt.hash(password, 10);
     const user = await User.create({ email, username, passwordHash });
     const token = signJwt({ userId: (user._id as Types.ObjectId).toString(), username: user.username || '' });
     res.cookie(COOKIE_NAME, token, COOKIE_OPTS);
     return res.json({ _id: user._id, email: user.email, username: user.username, level: user.level, money: user.money, exp: user.exp });
-  } catch {
-    return res.status(500).json({ error: 'Server error' });
+  } catch (err: any) {
+    console.error('Signup error:', err);
+    if (err.code === 11000) {
+      const field = Object.keys(err.keyPattern || {})[0];
+      return res.status(409).json({ error: `${field} already taken` });
+    }
+    return res.status(500).json({ error: err.message || 'Server error' });
   }
 });
 
 app.post('/api/auth/login', async (req: Request, res: Response) => {
   try {
     const { email, password } = (req.body || {}) as { email?: string; password?: string };
-    if (!email || !password) return res.status(400).json({ error: 'Missing fields' });
+    if (!email || !password) return res.status(400).json({ error: 'Email and password are required' });
+    
     const user = await User.findOne({ email });
-    if (!user || !user.passwordHash) return res.status(401).json({ error: 'Invalid credentials' });
+    if (!user || !user.passwordHash) return res.status(401).json({ error: 'Invalid email or password' });
+    
     const ok = await bcrypt.compare(password, user.passwordHash);
-    if (!ok) return res.status(401).json({ error: 'Invalid credentials' });
+    if (!ok) return res.status(401).json({ error: 'Invalid email or password' });
+    
     const token = signJwt({ userId: (user._id as Types.ObjectId).toString(), username: user.username || '' });
     res.cookie(COOKIE_NAME, token, COOKIE_OPTS);
     return res.json({ _id: user._id, email: user.email, username: user.username, level: user.level, money: user.money, exp: user.exp });
-  } catch {
-    return res.status(500).json({ error: 'Server error' });
+  } catch (err: any) {
+    console.error('Login error:', err);
+    return res.status(500).json({ error: err.message || 'Server error' });
   }
 });
 
@@ -741,14 +933,35 @@ app.post('/api/auth/logout', (req: Request, res: Response) => {
 app.get('/api/auth/me', authRequired, async (req: Request, res: Response) => {
   const user = await User.findById(req.user!.userId).select('_id email username level exp money mmr bestWpm totalRaces averageAccuracy wins');
   if (!user) return res.status(404).json({ error: 'Not found' });
-  return res.json(user);
+  const prog = computeLevelProgress(user.exp || 0);
+  return res.json({
+    _id: user._id,
+    email: user.email,
+    username: user.username,
+    level: user.level,
+    exp: user.exp,
+    money: user.money,
+    mmr: user.mmr,
+    bestWpm: user.bestWpm,
+    totalRaces: user.totalRaces,
+    averageAccuracy: user.averageAccuracy,
+    wins: user.wins,
+    equipped: (user as any).equipped || {},
+    nextLevelXp: prog.nextLevelXp,
+    expInLevel: prog.expInLevel
+  });
 });
 
 app.get('/api/leaderboard', async (req: Request, res: Response) => {
   try {
-    const leaderboard = await User.find().sort({ bestWpm: -1 }).limit(10).select('username bestWpm totalRaces averageAccuracy wins');
+    // Only show users who have completed at least 1 race and have a valid username
+    const leaderboard = await User.find({ 
+      username: { $exists: true, $nin: [null, ''] },
+      totalRaces: { $gt: 0 }
+    }).sort({ bestWpm: -1 }).limit(10).select('username bestWpm totalRaces averageAccuracy wins');
     res.json(leaderboard);
-  } catch {
+  } catch (err) {
+    console.error('Leaderboard error:', err);
     res.status(500).json({ error: 'Алдаа гарлаа' });
   }
 });
@@ -780,6 +993,36 @@ app.get('/api/stats/:username', async (req: Request, res: Response) => {
     res.json(user);
   } catch {
     res.status(500).json({ error: 'Алдаа гарлаа' });
+  }
+});
+
+app.get('/api/profile/:username', async (req: Request, res: Response) => {
+  try {
+    const user = await User.findOne({ username: req.params.username })
+      .select('_id username level exp money wins bestWpm totalRaces averageAccuracy equipped teamId');
+    if (!user) return res.status(404).json({ error: 'Хэрэглэгч олдсонгүй' });
+    let team: any = null;
+    if (user.teamId) {
+      const t = await Team.findById(user.teamId).select('_id name ownerId');
+      if (t) team = { _id: t._id, name: t.name, ownerId: t.ownerId };
+    }
+    const friendsCount = await User.countDocuments({ _id: { $in: (user as any).friends || [] } });
+    return res.json({
+      _id: user._id,
+      username: user.username,
+      level: user.level,
+      exp: user.exp,
+      money: user.money,
+      wins: user.wins,
+      bestWpm: user.bestWpm,
+      totalRaces: user.totalRaces,
+      averageAccuracy: user.averageAccuracy,
+      equipped: (user as any).equipped || {},
+      team,
+      friendsCount
+    });
+  } catch {
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
@@ -831,16 +1074,222 @@ app.get('/api/leaderboard/:scope', async (req: Request, res: Response) => {
   }
 });
 
+// Flexible leaderboard: /api/leaderboard2?scope=daily|weekly|monthly|alltime&metric=speed|accuracy|games
+// Debug endpoint to check race data
+app.get('/api/debug/races', authRequired, async (req: Request, res: Response) => {
+  try {
+    const myId = req.user!.userId;
+    const myRaces = await Race.find({ 'players.userId': myId }).limit(10).sort({ createdAt: -1 });
+    const myUser = await User.findById(myId).select('username bestWpm totalRaces');
+    return res.json({ 
+      userId: myId,
+      user: myUser,
+      racesFound: myRaces.length,
+      races: myRaces.map(r => ({
+        id: r._id,
+        createdAt: r.createdAt,
+        players: r.players.map((p: any) => ({ userId: p.userId, username: p.username, wpm: p.wpm }))
+      }))
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/leaderboard2', async (req: Request, res: Response) => {
+  try {
+    const scope = String(req.query.scope || 'alltime');
+    const metric = String(req.query.metric || 'speed');
+    const limit = Math.max(1, Math.min(100, Number(req.query.limit || 10)));
+    const now = new Date();
+    let start: Date | null = null;
+    if (scope === 'daily') {
+      start = new Date(now);
+      start.setUTCHours(0, 0, 0, 0);
+    } else if (scope === 'weekly') {
+      start = new Date(now);
+      const day = now.getUTCDay();
+      const diff = (day + 6) % 7;
+      start.setUTCDate(now.getUTCDate() - diff);
+      start.setUTCHours(0, 0, 0, 0);
+    } else if (scope === 'monthly') {
+      start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0));
+    } else {
+      start = null; // all time
+    }
+
+    const matchStage: any = start ? { createdAt: { $gte: start } } : {};
+
+    // Build aggregation based on metric (FILTER OUT BOTS: userId !== '0')
+    let pipeline: any[] = [
+      { $match: matchStage },
+      { $unwind: '$players' },
+      { $match: { 'players.userId': { $nin: ['0', null], $exists: true } } }, // Filter out bots
+    ];
+    if (metric === 'speed') {
+      pipeline.push(
+        { $group: { _id: '$players.userId', value: { $max: '$players.wpm' } } },
+        { $sort: { value: -1 } }
+      );
+    } else if (metric === 'accuracy') {
+      pipeline.push(
+        { $group: { _id: '$players.userId', value: { $max: '$players.accuracy' } } },
+        { $sort: { value: -1 } }
+      );
+    } else if (metric === 'games') {
+      pipeline.push(
+        { $group: { _id: '$players.userId', value: { $sum: 1 } } },
+        { $sort: { value: -1 } }
+      );
+    } else {
+      return res.status(400).json({ error: 'Invalid metric' });
+    }
+    pipeline.push({ $limit: limit });
+
+    const agg = await Race.aggregate(pipeline);
+    
+    // Filter out invalid user IDs and convert to ObjectId
+    const validUserIds: Types.ObjectId[] = [];
+    for (const a of agg) {
+      try {
+        if (a._id && mongoose.Types.ObjectId.isValid(a._id)) {
+          validUserIds.push(new Types.ObjectId(a._id));
+        }
+      } catch {}
+    }
+    
+    const users = await User.find({ _id: { $in: validUserIds } }).select('_id username');
+    const idToName = new Map(users.map(u => [ (u._id as Types.ObjectId).toString(), u.username ]));
+    
+    // Only include entries with valid usernames
+    const entries = (agg || [])
+      .map((a: any) => ({ 
+        userId: a._id, 
+        username: idToName.get(String(a._id)), 
+        value: Math.round(a.value || 0) 
+      }))
+      .filter((e: any) => e.username); // Filter out entries without valid usernames
+
+    // Include current user's rank/value if authenticated
+    let me: any = null;
+    try {
+      const token = (req.cookies?.[COOKIE_NAME]) as string | undefined;
+      if (token) {
+        const decoded = jwt.verify(token, JWT_SECRET) as { userId: string };
+        const myId = decoded.userId;
+        // Compute my value (exclude bots)
+        const myValueAgg = await Race.aggregate([
+          { $match: matchStage },
+          { $unwind: '$players' },
+          { $match: { 'players.userId': myId } },
+          ...(metric === 'speed' ? [{ $group: { _id: '$players.userId', value: { $max: '$players.wpm' } } }] :
+             metric === 'accuracy' ? [{ $group: { _id: '$players.userId', value: { $max: '$players.accuracy' } } }] :
+             [{ $group: { _id: '$players.userId', value: { $sum: 1 } } }]
+          ),
+        ]);
+        const myValue = myValueAgg[0]?.value as number | undefined;
+        if (myValue != null) {
+          // Compute rank: count how many REAL players have strictly higher value (exclude bots)
+          const rankAgg = await Race.aggregate([
+            { $match: matchStage },
+            { $unwind: '$players' },
+            { $match: { 'players.userId': { $nin: ['0', null], $exists: true } } }, // Filter out bots
+            ...(metric === 'speed' ? [{ $group: { _id: '$players.userId', value: { $max: '$players.wpm' } } }] :
+               metric === 'accuracy' ? [{ $group: { _id: '$players.userId', value: { $max: '$players.accuracy' } } }] :
+               [{ $group: { _id: '$players.userId', value: { $sum: 1 } } }]
+            ),
+            { $match: { value: { $gt: myValue } } },
+            { $count: 'better' }
+          ]);
+          const better = rankAgg[0]?.better || 0;
+          const user = await User.findById(myId).select('_id username');
+          me = { userId: myId, username: user?.username || 'Me', value: Math.round(myValue), rank: better + 1 };
+        }
+      }
+    } catch {}
+
+    return res.json({ scope, metric, entries, me });
+  } catch (err) {
+    console.error('Leaderboard error:', err);
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // Shop & Inventory
 app.get('/api/shop/catalog', async (req: Request, res: Response) => {
   try {
-    const count = await ShopItem.countDocuments();
-    if (count === 0) {
-      await ShopItem.insertMany([
-        { sku: 'car.basic', name: 'Starter Car', type: 'car', rarity: 'common', price: 100, currency: 'coins', meta: { speed: 1 } },
-        { sku: 'car.sport', name: 'Sportster', type: 'car', rarity: 'rare', price: 500, currency: 'coins', meta: { speed: 2 } },
-        { sku: 'skin.flame', name: 'Flame Skin', type: 'skin', rarity: 'epic', price: 300, currency: 'coins' }
-      ]);
+    const definitions = [
+      // Cars (cheapest -> most expensive); first is default
+      { sku: 'car.basic', name: 'Starter Car', type: 'car', rarity: 'common', price: 0, currency: 'coins', image: 'https://res.cloudinary.com/do4w2eaik/image/upload/v1761888012/Untitled_Project__1_-removebg-preview_hrjhi8.png' },
+      { sku: 'car.sport', name: 'Sportster', type: 'car', rarity: 'rare', price: 500, currency: 'coins', image: 'https://res.cloudinary.com/do4w2eaik/image/upload/v1761888012/Untitled_Project__4_-removebg-preview_xs2b6h.png' },
+      { sku: 'car.racer', name: 'Racer X', type: 'car', rarity: 'rare', price: 800, currency: 'coins', image: 'https://res.cloudinary.com/do4w2eaik/image/upload/v1761888012/Untitled_Project__2_-removebg-preview_qead3u.png' },
+      { sku: 'car.speed', name: 'Speed Demon', type: 'car', rarity: 'epic', price: 1200, currency: 'coins', image: 'https://res.cloudinary.com/do4w2eaik/image/upload/v1761888014/Untitled_Project__9_-removebg-preview_xhijk0.png' },
+      { sku: 'car.nitro', name: 'Nitro Beast', type: 'car', rarity: 'legendary', price: 2000, currency: 'coins', image: 'https://res.cloudinary.com/do4w2eaik/image/upload/v1761888014/Untitled_Project__8_-removebg-preview_p95rlk.png' },
+      // Skins mapped to Cloudinary car images for previews
+      { sku: 'skin.flame', name: 'Flame Skin', type: 'skin', rarity: 'epic', price: 300, currency: 'coins', image: 'https://res.cloudinary.com/do4w2eaik/image/upload/v1761888015/Untitled_Project__10_-removebg-preview_z7na2d.png' },
+      { sku: 'skin.neon', name: 'Neon Glow', type: 'skin', rarity: 'rare', price: 250, currency: 'coins', image: 'https://res.cloudinary.com/do4w2eaik/image/upload/v1761888014/Untitled_Project__7_-removebg-preview_iz5bl4.png' },
+      { sku: 'skin.tiger', name: 'Tiger Stripes', type: 'skin', rarity: 'legendary', price: 700, currency: 'coins', image: 'https://res.cloudinary.com/do4w2eaik/image/upload/v1761888012/Untitled_Project__3_-removebg-preview_hiawbt.png' },
+      { sku: 'skin.ice', name: 'Ice Skin', type: 'skin', rarity: 'epic', price: 350, currency: 'coins', image: 'https://res.cloudinary.com/do4w2eaik/image/upload/v1761888011/Untitled_Project__11_-removebg-preview_xgt6lm.png' },
+      { sku: 'skin.rainbow', name: 'Rainbow Skin', type: 'skin', rarity: 'legendary', price: 500, currency: 'coins', image: 'https://res.cloudinary.com/do4w2eaik/image/upload/v1761888013/Untitled_Project__5_-removebg-preview_imugek.png' },
+      // Boosts
+      { sku: 'boost.exp', name: 'XP Booster', type: 'boost', rarity: 'common', price: 50, currency: 'coins', image: '' },
+      { sku: 'boost.coins', name: 'Coin Doubler', type: 'boost', rarity: 'rare', price: 100, currency: 'coins', image: '' },
+    ];
+    const upserts = definitions.map(d => ({
+      updateOne: {
+        filter: { sku: d.sku },
+        update: { $setOnInsert: { name: d.name, type: d.type, rarity: d.rarity, price: d.price, currency: d.currency, meta: {} }, $set: { 'meta.image': d.image } },
+        upsert: true,
+      }
+    }));
+    if (upserts.length) {
+      try { await ShopItem.bulkWrite(upserts, { ordered: false }); } catch { /* ignore */ }
+    }
+    // Backfill images for cars (in case catalog existed before images were added)
+    const CAR_IMAGES: Record<string, string> = {
+      'car.basic': 'https://res.cloudinary.com/do4w2eaik/image/upload/v1761888012/Untitled_Project__1_-removebg-preview_hrjhi8.png',
+      // Legacy SKUs present in existing DB
+      'car.sport': 'https://res.cloudinary.com/do4w2eaik/image/upload/v1761888012/Untitled_Project__4_-removebg-preview_xs2b6h.png',
+      'car.racer': 'https://res.cloudinary.com/do4w2eaik/image/upload/v1761888012/Untitled_Project__2_-removebg-preview_qead3u.png',
+      'car.speed': 'https://res.cloudinary.com/do4w2eaik/image/upload/v1761888014/Untitled_Project__9_-removebg-preview_xhijk0.png',
+      'car.nitro': 'https://res.cloudinary.com/do4w2eaik/image/upload/v1761888014/Untitled_Project__8_-removebg-preview_p95rlk.png',
+      'car.2': 'https://res.cloudinary.com/do4w2eaik/image/upload/v1761888012/Untitled_Project__4_-removebg-preview_xs2b6h.png',
+      'car.3': 'https://res.cloudinary.com/do4w2eaik/image/upload/v1761888012/Untitled_Project__2_-removebg-preview_qead3u.png',
+      'car.4': 'https://res.cloudinary.com/do4w2eaik/image/upload/v1761888011/Untitled_Project-removebg-preview_q0v2ze.png',
+      'car.5': 'https://res.cloudinary.com/do4w2eaik/image/upload/v1761888012/Untitled_Project__3_-removebg-preview_hiawbt.png',
+      'car.6': 'https://res.cloudinary.com/do4w2eaik/image/upload/v1761888013/Untitled_Project__5_-removebg-preview_imugek.png',
+      'car.7': 'https://res.cloudinary.com/do4w2eaik/image/upload/v1761888014/Untitled_Project__7_-removebg-preview_iz5bl4.png',
+      'car.8': 'https://res.cloudinary.com/do4w2eaik/image/upload/v1761888011/Untitled_Project__11_-removebg-preview_xgt6lm.png',
+      'car.9': 'https://res.cloudinary.com/do4w2eaik/image/upload/v1761888013/Untitled_Project__5_-removebg-preview_imugek.png',
+      'car.10': 'https://res.cloudinary.com/do4w2eaik/image/upload/v1761888015/Untitled_Project__10_-removebg-preview_z7na2d.png',
+      'car.11': 'https://res.cloudinary.com/do4w2eaik/image/upload/v1761888014/Untitled_Project__8_-removebg-preview_p95rlk.png',
+      'car.12': 'https://res.cloudinary.com/do4w2eaik/image/upload/v1761888014/Untitled_Project__9_-removebg-preview_xhijk0.png',
+    };
+    const SKIN_IMAGES: Record<string, string> = {
+      'skin.flame': 'https://res.cloudinary.com/do4w2eaik/image/upload/v1761888015/Untitled_Project__10_-removebg-preview_z7na2d.png',
+      'skin.neon': 'https://res.cloudinary.com/do4w2eaik/image/upload/v1761888014/Untitled_Project__7_-removebg-preview_iz5bl4.png',
+      'skin.tiger': 'https://res.cloudinary.com/do4w2eaik/image/upload/v1761888012/Untitled_Project__3_-removebg-preview_hiawbt.png',
+      'skin.ice': 'https://res.cloudinary.com/do4w2eaik/image/upload/v1761888011/Untitled_Project__11_-removebg-preview_xgt6lm.png',
+      'skin.rainbow': 'https://res.cloudinary.com/do4w2eaik/image/upload/v1761888013/Untitled_Project__5_-removebg-preview_imugek.png',
+    };
+    const ops = [
+      ...Object.entries(CAR_IMAGES).map(([sku, url]) => ({
+        updateOne: {
+          filter: { sku, type: 'car' },
+          update: { $set: { 'meta.image': url } },
+          upsert: false,
+        }
+      })),
+      ...Object.entries(SKIN_IMAGES).map(([sku, url]) => ({
+        updateOne: {
+          filter: { sku, type: 'skin' },
+          update: { $set: { 'meta.image': url } },
+          upsert: false,
+        }
+      })),
+    ];
+    if (ops.length) {
+      try { await ShopItem.bulkWrite(ops, { ordered: false }); } catch { /* ignore */ }
     }
     const items = await ShopItem.find().select('-__v');
     res.json(items);
@@ -872,6 +1321,40 @@ app.post('/api/shop/purchase', authRequired, async (req: Request, res: Response)
   }
 });
 
+// Equip loadout (car/skin)
+app.post('/api/equip', authRequired, async (req: Request, res: Response) => {
+  try {
+    const { carSku, skinSku } = (req.body || {}) as { carSku?: string; skinSku?: string };
+    if (!carSku && !skinSku) return res.status(400).json({ error: 'Nothing to equip' });
+
+    const user = await User.findById(req.user!.userId);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    // Validate ownership using Inventory
+    const inv = await Inventory.findOne({ userId: user._id });
+    const owned = new Set((inv?.items || []).map(i => i.sku));
+
+    const updates: { [k: string]: string } = {};
+    if (carSku) {
+      if (!owned.has(carSku) && carSku !== 'car.basic') {
+        return res.status(400).json({ error: 'Car not owned' });
+      }
+      updates['equipped.carSku'] = carSku;
+    }
+    if (skinSku) {
+      if (!owned.has(skinSku)) {
+        return res.status(400).json({ error: 'Skin not owned' });
+      }
+      updates['equipped.skinSku'] = skinSku;
+    }
+
+    const updated = await User.findByIdAndUpdate(user._id, { $set: updates }, { new: true });
+    return res.json({ equipped: (updated as any)?.equipped || {} });
+  } catch (err) {
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
 app.get('/api/inventory', authRequired, async (req: Request, res: Response) => {
   try {
     const inv = await Inventory.findOne({ userId: req.user!.userId });
@@ -881,6 +1364,90 @@ app.get('/api/inventory', authRequired, async (req: Request, res: Response) => {
   }
 });
 
+// Friends endpoints
+app.get('/api/friends', authRequired, async (req: Request, res: Response) => {
+  try {
+    const user = await User.findById(req.user!.userId).select('friends');
+    const friends = await User.find({ _id: { $in: user?.friends || [] } }).select('_id username');
+    res.json(friends);
+  } catch {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/friends/add', authRequired, async (req: Request, res: Response) => {
+  try {
+    const { username } = (req.body || {}) as { username?: string };
+    if (!username) return res.status(400).json({ error: 'Missing username' });
+    const target = await User.findOne({ username });
+    if (!target) return res.status(404).json({ error: 'User not found' });
+    if ((target._id as Types.ObjectId).toString() === req.user!.userId) return res.status(400).json({ error: 'Cannot add self' });
+    await User.findByIdAndUpdate(req.user!.userId, { $addToSet: { friends: target._id } });
+    res.json({ ok: true });
+  } catch {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/friends/remove', authRequired, async (req: Request, res: Response) => {
+  try {
+    const { userId } = (req.body || {}) as { userId?: string };
+    if (!userId) return res.status(400).json({ error: 'Missing userId' });
+    await User.findByIdAndUpdate(req.user!.userId, { $pull: { friends: new Types.ObjectId(userId) } });
+    res.json({ ok: true });
+  } catch {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Teams endpoints
+app.post('/api/teams', authRequired, async (req: Request, res: Response) => {
+  try {
+    const { name } = (req.body || {}) as { name?: string };
+    if (!name) return res.status(400).json({ error: 'Missing name' });
+    const team = await Team.create({ name, ownerId: new Types.ObjectId(req.user!.userId), members: [new Types.ObjectId(req.user!.userId)] });
+    await User.findByIdAndUpdate(req.user!.userId, { $set: { teamId: team._id } });
+    res.json(team);
+  } catch {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/teams/join', authRequired, async (req: Request, res: Response) => {
+  try {
+    const { teamId } = (req.body || {}) as { teamId?: string };
+    if (!teamId) return res.status(400).json({ error: 'Missing teamId' });
+    const team = await Team.findByIdAndUpdate(teamId, { $addToSet: { members: new Types.ObjectId(req.user!.userId) } }, { new: true });
+    if (!team) return res.status(404).json({ error: 'Team not found' });
+    await User.findByIdAndUpdate(req.user!.userId, { $set: { teamId: team._id } });
+    res.json(team);
+  } catch {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/teams/leave', authRequired, async (req: Request, res: Response) => {
+  try {
+    const user = await User.findById(req.user!.userId).select('teamId');
+    if (!user?.teamId) return res.status(400).json({ error: 'Not in a team' });
+    await Team.findByIdAndUpdate(user.teamId, { $pull: { members: new Types.ObjectId(req.user!.userId) } });
+    await User.findByIdAndUpdate(req.user!.userId, { $set: { teamId: null } });
+    res.json({ ok: true });
+  } catch {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.get('/api/teams/:id', async (req: Request, res: Response) => {
+  try {
+    const team = await Team.findById(req.params.id);
+    if (!team) return res.status(404).json({ error: 'Not found' });
+    const members = await User.find({ _id: { $in: team.members } }).select('_id username');
+    res.json({ _id: team._id, name: team.name, ownerId: team.ownerId, members });
+  } catch {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
 // Tasks / Achievements / Battlepass
 const TASK_DEFS = [
   { key: 'daily_races_3', title: 'Өдөрт 3 уралдаан', period: 'daily', goal: 3, rewardCoins: 50 },
@@ -991,19 +1558,108 @@ app.get('/api/progress/achievements', authRequired, async (req: Request, res: Re
   }
 });
 
-const BP_TIERS = [
-  { xp: 0, reward: { coins: 0 } },
-  { xp: 100, reward: { coins: 100 } },
-  { xp: 250, reward: { coins: 200 } },
-  { xp: 500, reward: { coins: 400 } },
-];
+function generateBattlepassTiers(): Array<{ xp: number; free: any; premium: any }> {
+  // 30 tiers; XP thresholds are cumulative sums of xpForLevel with 15% growth
+  const tiers: Array<{ xp: number; free: any; premium: any }> = [];
+  let cumulative = 0;
+  for (let i = 1; i <= 30; i++) {
+    const need = xpForLevel(i); // base 100 with 1.15 growth
+    cumulative += need;
+    // Example rewards: free coins increasing; premium adds items/titles periodically
+    const freeCoins = Math.min(500, Math.round(25 * i));
+    const premiumCoins = Math.min(1000, Math.round(50 * i));
+    const tier: any = {
+      xp: cumulative,
+      free: { coins: freeCoins },
+      premium: { coins: premiumCoins },
+    };
+    if (i === 5) tier.premium.sku = 'skin.neon';
+    if (i === 10) tier.premium.sku = 'car.sport';
+    if (i === 15) tier.premium.sku = 'skin.tiger';
+    if (i === 20) tier.premium.title = 'Racing Champion';
+    if (i === 25) tier.premium.sku = 'skin.flame';
+    tiers.push(tier);
+  }
+  return tiers;
+}
 
 app.get('/api/battlepass', authRequired, async (req: Request, res: Response) => {
   try {
     const seasonId = `${new Date().getUTCFullYear()}-${new Date().getUTCMonth() + 1}`;
+    const periodStart = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 1, 0, 0, 0));
     const user = await User.findById(req.user!.userId).select('exp');
     const xp = user?.exp || 0;
-    res.json({ seasonId, tiers: BP_TIERS, xp });
+    const TIERS = generateBattlepassTiers();
+
+    // Get claimed tiers
+    const claimed = await TaskClaim.find({ 
+      userId: req.user!.userId, 
+      taskKey: { $regex: `^(bp_${seasonId}_)|(bp_overflow_${seasonId}_)` },
+      periodStart 
+    });
+    const claimedSet = new Set(claimed.map(c => c.taskKey));
+
+    // Overflow computation beyond tier 30
+    let overflowCount = 0;
+    if (xp > (TIERS[TIERS.length - 1]?.xp || 0)) {
+      let curXp = (TIERS[TIERS.length - 1]?.xp || 0);
+      let level = 31;
+      while (true) {
+        const need = xpForLevel(level);
+        curXp += need;
+        if (xp >= curXp) { overflowCount++; level++; } else break;
+        if (overflowCount > 1000) break; // safety
+      }
+    }
+
+    res.json({ seasonId, tiers: TIERS, xp, claimed: Array.from(claimedSet), overflow: { count: overflowCount } });
+  } catch {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/battlepass/claim', authRequired, async (req: Request, res: Response) => {
+  try {
+    const seasonId = `${new Date().getUTCFullYear()}-${new Date().getUTCMonth() + 1}`;
+    const { tier, track } = (req.body || {}) as { tier?: number; track?: 'free' | 'premium' | 'overflow' };
+    if (typeof tier !== 'number' || !track) return res.status(400).json({ error: 'Missing tier xp or track' });
+    const TIERS = generateBattlepassTiers();
+    const def = TIERS.find(t => t.xp === tier);
+    const user = await User.findById(req.user!.userId).select('exp money');
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    if ((user.exp || 0) < tier) return res.status(400).json({ error: 'Not enough XP' });
+
+    // Reuse TaskClaim as battlepass claim tracker for the season
+    const periodStart = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 1, 0, 0, 0));
+    const key = track === 'overflow' ? `bp_overflow_${seasonId}_${tier}` : `bp_${seasonId}_${tier}_${track}`;
+    const already = await TaskClaim.findOne({ userId: req.user!.userId, taskKey: key, periodStart });
+    if (already) return res.status(400).json({ error: 'Already claimed' });
+
+    await TaskClaim.create({ userId: new Types.ObjectId(req.user!.userId), taskKey: key, periodStart });
+
+    let coinsGranted = 0;
+    let skuGranted: string | undefined;
+    let titleGranted: string | undefined;
+
+    if (track === 'overflow') {
+      coinsGranted = 1000; // per extra level beyond 30
+    } else {
+      const reward = (def as any)[track];
+      if (!reward) return res.status(400).json({ error: 'Invalid track' });
+      coinsGranted = reward.coins || 0;
+      skuGranted = reward.sku;
+      titleGranted = reward.title;
+      if (skuGranted) {
+        await Inventory.findOneAndUpdate(
+          { userId: user._id },
+          { $push: { items: { sku: skuGranted } } },
+          { upsert: true }
+        );
+      }
+    }
+
+    const updated = coinsGranted ? await User.findByIdAndUpdate(req.user!.userId, { $inc: { money: coinsGranted } }, { new: true }) : user;
+    return res.json({ ok: true, rewardCoins: coinsGranted, balance: updated?.money || user.money || 0, tier, track, sku: skuGranted, title: titleGranted });
   } catch {
     res.status(500).json({ error: 'Server error' });
   }

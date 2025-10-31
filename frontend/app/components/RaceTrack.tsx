@@ -7,6 +7,7 @@ interface RacerLane {
   name: string;
   progress: number; // 0..100
   accent: string; // tailwind color class
+  imageUrl?: string;
 }
 
 interface RaceTrackProps {
@@ -33,12 +34,18 @@ export default function RaceTrack({ lanes, activeIndex = 0 }: RaceTrackProps) {
                 transition={{ type: 'spring', stiffness: 120, damping: 18 }}
               />
               <motion.div
-                className="absolute -top-2 aspect-[2/1] h-10 select-none text-center"
-                style={{ left: `calc(${lane.progress}% - 20px)` }}
+                className="absolute -top-2 select-none text-center"
+                style={{ left: `calc(${lane.progress}% - 34px)` }}
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
               >
-                <span className="text-lg">🏎️</span>
+                <div className="h-10 w-[68px] rounded bg-black/20 border border-white/10 overflow-hidden flex items-center justify-center shadow">
+                  {lane.imageUrl ? (
+                    <img src={lane.imageUrl} alt={lane.name} className="h-10 object-contain" />
+                  ) : (
+                    <span className="text-lg">🏎️</span>
+                  )}
+                </div>
               </motion.div>
             </div>
           </div>
@@ -47,6 +54,8 @@ export default function RaceTrack({ lanes, activeIndex = 0 }: RaceTrackProps) {
     </div>
   );
 }
+
+
 
 
 

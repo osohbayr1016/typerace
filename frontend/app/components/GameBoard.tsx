@@ -2,6 +2,8 @@
 
 import { useState, useEffect, useRef } from 'react';
 import RaceTrack from './RaceTrack';
+import { useMemo } from 'react';
+import { api } from '../lib/api';
 import StatsHUD from './StatsHUD';
 import CountdownModal from './CountdownModal';
 import ResultsModal from './ResultsModal';
@@ -37,6 +39,18 @@ export default function GameBoard({ text, onComplete }: GameBoardProps) {
   const elapsedMinutes = Math.max(0.001, (timeElapsed || 0) / 60000);
   const wordsCompleted = currentIndex;
   const liveWpm = Math.floor(wordsCompleted / elapsedMinutes);
+
+  const [carImageUrl, setCarImageUrl] = useState<string | undefined>(undefined);
+  useEffect(() => {
+    (async () => {
+      try {
+        const [me, catalog] = await Promise.all([api.me().catch(() => null), api.catalog().catch(() => [])]);
+        const carSku = (me as any)?.equipped?.carSku || 'car.basic';
+        const item = (catalog as any[]).find(i => i.sku === carSku);
+        setCarImageUrl(item?.meta?.image);
+      } catch {}
+    })();
+  }, []);
 
   useEffect(() => {
     if (isGameActive && startTime) {
@@ -102,7 +116,7 @@ export default function GameBoard({ text, onComplete }: GameBoardProps) {
   const progressPct = ((currentIndex + (userInput.length / Math.max(1, currentWord.length))) / Math.max(1, totalWords)) * 100;
 
   const lanes = [
-    { id: 'me', name: 'Та', progress: progressPct, accent: 'bg-gradient-to-r from-yellow-300 to-amber-500' },
+    { id: 'me', name: 'Та', progress: progressPct, accent: 'bg-gradient-to-r from-yellow-300 to-amber-500', imageUrl: carImageUrl },
   ];
 
   return (

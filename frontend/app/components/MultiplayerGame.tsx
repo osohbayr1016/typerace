@@ -32,10 +32,24 @@ export default function MultiplayerGame({ username, onBack }: MultiplayerGamePro
   const [showCountdown, setShowCountdown] = useState(false);
   const [raceResults, setRaceResults] = useState<any>(null);
   const [showLiveResults, setShowLiveResults] = useState(false);
+  const [provisionalRewards, setProvisionalRewards] = useState<{ coins: number; exp: number } | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    const s = io('http://localhost:5000');
+    // Get auth token from cookies for authenticated users
+    const getAuthToken = () => {
+      if (typeof document === 'undefined') return null;
+      const cookies = document.cookie.split(';');
+      const authCookie = cookies.find(c => c.trim().startsWith('auth_token='));
+      return authCookie ? authCookie.split('=')[1] : null;
+    };
+
+    const authToken = getAuthToken();
+    const s = io('http://localhost:5000', {
+      auth: {
+        token: authToken
+      }
+    });
     setSocket(s);
     s.on('waiting-state', (data: { players: { username: string; socketId: string }[]; countdownEndsAt: number | null }) => {
       setWaitingPlayers(data.players || []);
@@ -73,6 +87,23 @@ export default function MultiplayerGame({ username, onBack }: MultiplayerGamePro
       // Update the same modal to Final state; do not navigate or open new modals
       setRaceResults(data);
       // Keep current gameState; do not force another view
+    });
+    // Immediate reward when player finishes (before others)
+    s.on('player-finished-reward', (data: { coins: number; exp: number; levelUp: number }) => {
+      console.log('Received immediate reward:', data);
+      // Update provisional rewards with actual values from server
+      setProvisionalRewards({ coins: data.coins, exp: data.exp });
+      // Show notification or update UI to indicate rewards received
+      try { window.dispatchEvent(new Event('economy-updated')); } catch {}
+    });
+    // Placement bonus after all players finish
+    s.on('placement-bonus', (data: { exp: number; levelUp: number }) => {
+      console.log('Received placement bonus:', data);
+      try { window.dispatchEvent(new Event('economy-updated')); } catch {}
+    });
+    // Economy sync notifications (balance/exp changed)
+    s.on('economy-updated', () => {
+      try { window.dispatchEvent(new Event('economy-updated')); } catch {}
     });
     s.emit('join-waiting', { username });
     return () => { s.disconnect(); };
@@ -125,6 +156,10 @@ export default function MultiplayerGame({ username, onBack }: MultiplayerGamePro
           const accuracy = Math.round(((words.length - errors) / words.length) * 100);
           socket?.emit('race-complete', { raceId: raceData.raceId, wpm: finalWpm, accuracy, time: finalTime, errors });
           // Show live results modal immediately; keep background race rendering
+          // Compute provisional rewards (final coins & base EXP). Placement bonus will arrive with final results.
+          const provisionalCoins = Math.max(10, Math.floor(finalWpm));
+          const provisionalExp = Math.max(5, Math.floor(finalWpm / 2));
+          setProvisionalRewards({ coins: provisionalCoins, exp: provisionalExp });
           setShowLiveResults(true);
         }
       } else {
@@ -156,15 +191,27 @@ export default function MultiplayerGame({ username, onBack }: MultiplayerGamePro
           open={showLiveResults}
           players={raceData.players}
           rankings={raceResults?.rankings || null}
-          onClose={() => setShowLiveResults(false)}
+          currentUsername={username}
+          provisionalRewards={provisionalRewards || undefined}
+          onClose={() => {
+            setShowLiveResults(false);
+            setRaceData(null);
+            setProvisionalRewards(null);
+            onBack();
+          }}
           onRematch={() => {
             setShowLiveResults(false);
             setRaceData(null);
+            setRaceResults(null);
+            setProvisionalRewards(null);
             setCurrentIndex(0);
             setUserInput('');
             setErrors(0);
             setTimeElapsed(0);
+            setStartTime(null);
             setShowCountdown(false);
+            setRaceCountdownSeconds(0);
+            setRaceCountdownMs(0);
             setGameState('waiting');
             socket?.emit('join-waiting', { username });
           }}

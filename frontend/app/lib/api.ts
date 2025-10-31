@@ -37,6 +37,9 @@ export const api = {
   logout() {
     return request('/api/auth/logout', { method: 'POST' });
   },
+  equip(data: { carSku?: string; skinSku?: string }) {
+    return request('/api/equip', { method: 'POST', body: JSON.stringify(data) });
+  },
   catalog() {
     return request('/api/shop/catalog');
   },

@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { Users, Flag } from 'lucide-react';
 
-type WaitingPlayer = { username: string; socketId: string };
+type WaitingPlayer = { username: string; socketId: string; imageUrl?: string };
 
 interface WaitingLobbyProps {
   players: WaitingPlayer[];
@@ -46,6 +46,11 @@ export default function WaitingLobby({ players, countdownEndsAt, onBack }: Waiti
                 <div className="absolute inset-y-0 left-48 w-px bg-white/10" />
                 <div className="relative flex items-center gap-4 p-3">
                   <div className={`h-10 w-10 flex items-center justify-center rounded-full ${p ? 'bg-emerald-400 text-black' : 'bg-white/10 text-white/40'}`}>{idx + 1}</div>
+                  {p?.imageUrl && (
+                    <div className="h-10 w-16 rounded bg-black/30 border border-white/10 overflow-hidden flex items-center justify-center">
+                      <img src={p.imageUrl} alt={p.username} className="h-10 object-contain" />
+                    </div>
+                  )}
                   <div className="flex-1">
                     <div className="w-full bg-white/10 rounded-full h-2">
                       <div className={`${p ? 'bg-emerald-400' : 'bg-white/20'} h-2 rounded-full`} style={{ width: '0%' }} />

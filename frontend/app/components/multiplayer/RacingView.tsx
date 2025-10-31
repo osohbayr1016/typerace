@@ -11,6 +11,7 @@ interface Player {
   progress: number;
   wpm: number;
   finished: boolean;
+  imageUrl?: string;
 }
 
 interface RaceData {
@@ -26,7 +27,7 @@ interface RacingViewProps {
   timeElapsed: number;
   showCountdown: boolean;
   countdownSeconds?: number;
-  inputRef: RefObject<HTMLInputElement>;
+  inputRef: RefObject<HTMLInputElement | null>;
   onInputChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
   onCountdownComplete: () => void;
 }
@@ -80,8 +81,12 @@ export default function RacingView({ raceData, currentIndex, userInput, timeElap
 
                 <motion.div className="absolute top-1/2 -translate-y-1/2" animate={{ left: `${Math.min(96, Math.max(0, p.progress))}%` }} transition={{ type: 'tween', duration: 0.25 }}>
                   <div className="flex items-center gap-2">
-                    <div className="h-7 w-10 rounded bg-gradient-to-r from-sky-400 to-blue-500 flex items-center justify-center shadow-lg">
-                      <Car className="w-4 h-4 text-black" />
+                    <div className="h-10 w-[68px] rounded bg-black/20 border border-white/10 overflow-hidden flex items-center justify-center shadow-lg">
+                      {p.imageUrl ? (
+                        <img src={p.imageUrl} alt={p.username} className="h-10 object-contain" />
+                      ) : (
+                        <Car className="w-6 h-6 text-white/80" />
+                      )}
                     </div>
                   </div>
                 </motion.div>

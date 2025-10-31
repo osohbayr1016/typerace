@@ -23,6 +23,24 @@ export default function AuthModal({ open, onClose, onAuthed }: Props) {
     e.preventDefault();
     setLoading(true);
     setError(null);
+    
+    // Basic validation
+    if (mode === 'signup' && (!email || !username || !password)) {
+      setError('Бүх талбарыг бөглөнө үү');
+      setLoading(false);
+      return;
+    }
+    if (mode === 'login' && (!email || !password)) {
+      setError('Имэйл болон нууц үг оруулна уу');
+      setLoading(false);
+      return;
+    }
+    if (mode === 'signup' && password.length < 6) {
+      setError('Нууц үг хамгийн багадаа 6 тэмдэгт байх ёстой');
+      setLoading(false);
+      return;
+    }
+    
     try {
       let user;
       if (mode === 'signup') {
@@ -30,10 +48,17 @@ export default function AuthModal({ open, onClose, onAuthed }: Props) {
       } else {
         user = await api.login({ email, password });
       }
+      // Clear form on success
+      setEmail('');
+      setUsername('');
+      setPassword('');
+      setError(null);
       onAuthed?.(user);
       onClose();
     } catch (err: any) {
-      setError(err.message || 'Алдаа гарлаа');
+      const errorMessage = err.message || 'Алдаа гарлаа';
+      setError(errorMessage);
+      console.error('Auth error:', err);
     } finally {
       setLoading(false);
     }
