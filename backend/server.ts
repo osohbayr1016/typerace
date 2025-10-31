@@ -305,9 +305,9 @@ type ActiveRace = {
 
 const activeRaces = new Map<string, ActiveRace>();
 const waitingPlayers = new Map<string, { socketId: string; userId: string; username: string; joinedAt: number; isBot?: boolean; botTargetWpm?: number; imageUrl?: string }>();
-const botIntervals = new Map<string, NodeJS.Timeout[]>();
-let lobbyBotSeedTimer: NodeJS.Timeout | null = null;
-let lobbyBotAddInterval: NodeJS.Timeout | null = null;
+const botIntervals = new Map<string, ReturnType<typeof setInterval>[]>();
+let lobbyBotSeedTimer: ReturnType<typeof setTimeout> | null = null;
+let lobbyBotAddInterval: ReturnType<typeof setInterval> | null = null;
 
 // Queue settings and countdown state
 const MIN_PLAYERS = 3; // countdown allowed at 3+
@@ -315,7 +315,7 @@ const MAX_PLAYERS = 5; // cap lobby at 5 (fill with bots after start if needed)
 const COUNTDOWN_MS = 2000; // 2s countdown when threshold met
 const RACE_START_GRACE_MS = 2000; // extra modal countdown on race page
 const BOT_START_DELAY_MS = 1000; // bots start 1s after countdown ends
-let waitingCountdownTimer: NodeJS.Timeout | null = null;
+let waitingCountdownTimer: ReturnType<typeof setTimeout> | null = null;
 let countdownEndsAt: number | null = null;
 
 async function resolveCarImageUrl(userId: string): Promise<string | undefined> {
@@ -740,7 +740,7 @@ async function startRace() {
 }
 
 function startBotTyping(raceId: string, botPlayer: RacePlayer & { socketId: string; isBot?: boolean }, wordsCount: number, targetWpm: number, accuracy: number) {
-  const timers: NodeJS.Timeout[] = botIntervals.get(raceId) || [];
+  const timers: ReturnType<typeof setInterval>[] = botIntervals.get(raceId) || [];
   let typedWords = 0;
   const tickMs = 500;
   const wps = targetWpm / 60;
