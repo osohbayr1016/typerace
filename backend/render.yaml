@@ -2,7 +2,7 @@ services:
   - type: web
     name: typeracer-backend
     env: node
-    buildCommand: npm install
+    buildCommand: npm ci
     startCommand: npm start
     envVars:
       - key: MONGODB_URI

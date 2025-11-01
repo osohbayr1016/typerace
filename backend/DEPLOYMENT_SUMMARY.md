@@ -18,12 +18,20 @@
 - Added `migrate.ts` to exclude list to prevent migration files from being compiled
 
 ### 2. Package.json Configuration
-**Problem**: Missing engine specifications and proper build scripts.
+**Problem**: Missing engine specifications and proper build scripts. Type packages in wrong section.
 
 **Fixed**:
 - Added `engines` field specifying Node >=18.0.0 and npm >=9.0.0
+- Moved all `@types/*` packages to `devDependencies` (correct location)
 - Ensured build scripts are correctly configured
 - The `prestart` script automatically builds before starting
+
+### 2a. .npmrc Configuration
+**Problem**: Some deployment platforms skip devDependencies by default.
+
+**Fixed**:
+- Created `.npmrc` with `production=false` to ensure devDependencies install
+- This ensures TypeScript and type definitions are available during build
 
 ### 3. Deployment Configuration Files
 **Created**:
