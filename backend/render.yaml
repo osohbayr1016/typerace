@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: typeracer-backend
+    env: node
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: MONGODB_URI
+        sync: false
+      - key: PORT
+        value: 5000
+      - key: JWT_SECRET
+        sync: false
+      - key: COOKIE_NAME
+        value: auth_token
+      - key: CLIENT_ORIGIN
+        sync: false
+    healthCheckPath: /
+    regions:
+      - oregon
+
