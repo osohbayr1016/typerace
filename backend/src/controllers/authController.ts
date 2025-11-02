@@ -9,6 +9,7 @@ const COOKIE_MAX_AGE = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 export const signup = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
+    console.log('📝 Signup attempt received');
     const { email, username, password } = req.body;
 
     if (!email || !username || !password) {
@@ -21,11 +22,13 @@ export const signup = async (req: AuthRequest, res: Response): Promise<void> => 
       return;
     }
 
+    console.log('🔍 Checking for existing user:', email, username);
     const existingUser = await User.findOne({
       $or: [{ email }, { username }]
     });
 
     if (existingUser) {
+      console.log('❌ User already exists');
       res.status(400).json({ 
         error: existingUser.email === email 
           ? 'Email already registered' 
@@ -34,14 +37,17 @@ export const signup = async (req: AuthRequest, res: Response): Promise<void> => 
       return;
     }
 
+    console.log('🔐 Hashing password');
     const hashedPassword = await bcrypt.hash(password, 10);
 
+    console.log('👤 Creating user');
     const user = await User.create({
       email,
       username,
       password: hashedPassword
     });
 
+    console.log('🎟️ Generating token');
     const token = jwt.sign(
       { id: user._id, username: user.username, email: user.email },
       env.JWT_SECRET,
@@ -55,6 +61,7 @@ export const signup = async (req: AuthRequest, res: Response): Promise<void> => 
       sameSite: env.isProduction ? 'none' : 'lax'
     });
 
+    console.log('✅ Signup successful for:', user.username);
     res.status(201).json({
       user: {
         id: user._id,
@@ -68,13 +75,16 @@ export const signup = async (req: AuthRequest, res: Response): Promise<void> => 
       }
     });
   } catch (error) {
-    console.error('Signup error:', error);
+    console.error('❌ Signup error:', error);
+    console.error('Error details:', error instanceof Error ? error.message : 'Unknown error');
+    console.error('Error stack:', error instanceof Error ? error.stack : 'No stack trace');
     res.status(500).json({ error: 'Failed to create account' });
   }
 };
 
 export const login = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
+    console.log('🔐 Login attempt received');
     const { email, password } = req.body;
 
     if (!email || !password) {
@@ -82,20 +92,25 @@ export const login = async (req: AuthRequest, res: Response): Promise<void> => {
       return;
     }
 
+    console.log('🔍 Looking up user:', email);
     const user = await User.findOne({ email });
 
     if (!user) {
+      console.log('❌ User not found:', email);
       res.status(401).json({ error: 'Invalid email or password' });
       return;
     }
 
+    console.log('🔐 Validating password');
     const isPasswordValid = await bcrypt.compare(password, user.password);
 
     if (!isPasswordValid) {
+      console.log('❌ Invalid password');
       res.status(401).json({ error: 'Invalid email or password' });
       return;
     }
 
+    console.log('✅ Password valid, generating token');
     const token = jwt.sign(
       { id: user._id, username: user.username, email: user.email },
       env.JWT_SECRET,
@@ -109,6 +124,7 @@ export const login = async (req: AuthRequest, res: Response): Promise<void> => {
       sameSite: env.isProduction ? 'none' : 'lax'
     });
 
+    console.log('✅ Login successful for:', user.username);
     res.json({
       user: {
         id: user._id,
@@ -122,7 +138,9 @@ export const login = async (req: AuthRequest, res: Response): Promise<void> => {
       }
     });
   } catch (error) {
-    console.error('Login error:', error);
+    console.error('❌ Login error:', error);
+    console.error('Error details:', error instanceof Error ? error.message : 'Unknown error');
+    console.error('Error stack:', error instanceof Error ? error.stack : 'No stack trace');
     res.status(500).json({ error: 'Failed to login' });
   }
 };
