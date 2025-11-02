@@ -45,7 +45,8 @@ export default function MultiplayerGame({ username, onBack }: MultiplayerGamePro
     };
 
     const authToken = getAuthToken();
-    const s = io('http://localhost:5000', {
+    const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:5000';
+    const s = io(backendUrl, {
       auth: {
         token: authToken
       }
