@@ -8,7 +8,6 @@ const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
 
 export interface AuthSocket extends Socket {
   user?: SocketUser;
-  readonly id: string;
 }
 
 export const setupSocketIO = (httpServer: HTTPServer): Server => {
