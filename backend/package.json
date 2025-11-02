@@ -5,6 +5,7 @@
   "main": "dist/server.js",
   "scripts": {
     "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
+    "prebuild": "npm install",
     "build": "tsc",
     "start": "node dist/server.js",
     "lint": "eslint src --ext .ts"
@@ -43,3 +44,4 @@
     "ts-node-dev": "^2.0.0"
   }
 }
+
