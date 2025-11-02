@@ -43,6 +43,8 @@ export interface IRace extends Document {
 }
 
 export interface AuthRequest extends Request {
+  body: Request['body'];
+  cookies: Request['cookies'];
   user?: {
     id: string;
     username: string;

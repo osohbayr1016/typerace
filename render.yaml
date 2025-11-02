@@ -1,22 +1,17 @@
 services:
   - type: web
-    name: typeracer-backend
+    name: type-race-backend
     env: node
-    rootDir: backend
-    buildCommand: npm install && npm run build
-    startCommand: node dist/server.js
+    buildCommand: cd backend && npm install && npm run build
+    startCommand: cd backend && npm start
     envVars:
+      - key: NODE_ENV
+        value: production
       - key: MONGODB_URI
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: FRONTEND_URL
         sync: false
       - key: PORT
         value: 5000
-      - key: JWT_SECRET
-        sync: false
-      - key: COOKIE_NAME
-        value: auth_token
-      - key: CLIENT_ORIGIN
-        sync: false
-    healthCheckPath: /
-    regions:
-      - oregon
-
