@@ -17,26 +17,36 @@ const PORT = env.PORT;
 
 // CORS configuration
 const allowedOrigins = getAllowedOrigins();
+console.log('🌐 CORS allowed origins:', allowedOrigins);
+
 app.use(cors({
   origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
+    // Log the incoming origin for debugging
+    console.log('🔍 CORS request from origin:', origin);
+    
     // Allow requests with no origin (like mobile apps or curl requests)
     if (!origin) {
+      console.log('✅ Allowing request with no origin');
       return callback(null, true);
     }
     
     if (allowedOrigins.includes(origin)) {
+      console.log('✅ Origin allowed:', origin);
       callback(null, true);
     } else if (env.isProduction) {
       // In production, be strict about origins
+      console.log('❌ Origin not allowed:', origin);
+      console.log('💡 Allowed origins:', allowedOrigins);
       callback(new Error('Not allowed by CORS'));
     } else {
       // In development, allow all origins
+      console.log('✅ Development mode: allowing origin:', origin);
       callback(null, true);
     }
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  allowedHeaders: ['Content-Type', 'Authorization', 'Cookie']
 }));
 app.use(express.json());
 app.use(cookieParser());

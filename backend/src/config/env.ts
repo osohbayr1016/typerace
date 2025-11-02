@@ -70,6 +70,9 @@ export const getAllowedOrigins = (): string[] => {
   
   if (env.FRONTEND_URL) {
     origins.push(env.FRONTEND_URL);
+    // Also add with trailing slash in case browser sends it
+    origins.push(env.FRONTEND_URL.replace(/\/$/, ''));
+    origins.push(env.FRONTEND_URL + '/');
   }
 
   // Allow common production origins
