@@ -13,7 +13,7 @@ export const setupSocketIO = (httpServer: HTTPServer): Server => {
   
   const io = new Server(httpServer, {
     cors: {
-      origin: (origin, callback) => {
+      origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
         if (!origin || allowedOrigins.includes(origin) || !env.isProduction) {
           callback(null, true);
         } else {
