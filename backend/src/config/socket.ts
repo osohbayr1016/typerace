@@ -4,6 +4,8 @@ import jwt from 'jsonwebtoken';
 import { SocketUser } from '../types';
 import { env, getAllowedOrigins } from './env';
 
+// Extend Socket interface with user property
+// Socket.io Socket already has all properties (id, handshake, emit, on, etc.)
 export interface AuthSocket extends Socket {
   user?: SocketUser;
 }
