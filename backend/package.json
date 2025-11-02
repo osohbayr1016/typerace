@@ -21,6 +21,13 @@
     "npm": ">=9.0.0"
   },
   "dependencies": {
+    "@types/bcrypt": "^5.0.2",
+    "@types/cookie-parser": "^1.4.6",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/jsonwebtoken": "^9.0.5",
+    "@types/node": "^24.9.2",
+    "@types/uuid": "^9.0.7",
     "bcrypt": "^5.1.1",
     "cookie-parser": "^1.4.6",
     "cors": "^2.8.5",
@@ -29,17 +36,10 @@
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.0.3",
     "socket.io": "^4.6.1",
+    "typescript": "^5.3.3",
     "uuid": "^9.0.1"
   },
   "devDependencies": {
-    "@types/node": "^20.19.24",
-    "@types/bcrypt": "^5.0.2",
-    "@types/cookie-parser": "^1.4.6",
-    "@types/cors": "^2.8.17",
-    "@types/express": "^4.17.21",
-    "@types/jsonwebtoken": "^9.0.5",
-    "@types/uuid": "^9.0.7",
-    "typescript": "^5.3.3",
     "ts-node-dev": "^2.0.0"
   }
 }
