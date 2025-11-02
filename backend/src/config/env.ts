@@ -31,7 +31,16 @@ if (isProduction) {
   }
 }
 
-export const env = {
+interface EnvConfig {
+  NODE_ENV: string;
+  PORT: number;
+  MONGODB_URI: string;
+  JWT_SECRET: string;
+  FRONTEND_URL: string;
+  isProduction: boolean;
+}
+
+export const env: EnvConfig = {
   NODE_ENV: process.env.NODE_ENV || 'development',
   PORT: parseInt(process.env.PORT || '5000', 10),
   MONGODB_URI: process.env.MONGODB_URI || '',

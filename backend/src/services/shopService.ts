@@ -1,12 +1,18 @@
 import { User } from '../models/User';
 import { Item } from '../models/Item';
+import { IItem } from '../types';
 
-export const getCatalog = async () => {
+interface PurchaseResult {
+  item: IItem;
+  newBalance: number;
+}
+
+export const getCatalog = async (): Promise<IItem[]> => {
   const items = await Item.find();
   return items;
 };
 
-export const purchaseItem = async (userId: string, itemId: string) => {
+export const purchaseItem = async (userId: string, itemId: string): Promise<PurchaseResult> => {
   const user = await User.findById(userId);
   if (!user) {
     throw new Error('User not found');
@@ -35,13 +41,25 @@ export const purchaseItem = async (userId: string, itemId: string) => {
   };
 };
 
-export const seedShopItems = async () => {
+export const seedShopItems = async (): Promise<void> => {
   const existingItems = await Item.countDocuments();
   if (existingItems > 0) {
     return;
   }
 
-  const items = [
+  interface SeedItem {
+    sku: string;
+    name: string;
+    type: 'car' | 'skin';
+    price: number;
+    rarity: 'common' | 'rare' | 'epic' | 'legendary';
+    stats?: {
+      speed: number;
+      acceleration: number;
+    };
+  }
+
+  const items: SeedItem[] = [
     // Cars
     { sku: 'car_basic_red', name: 'Red Racer', type: 'car', price: 0, rarity: 'common', stats: { speed: 5, acceleration: 5 } },
     { sku: 'car_sport_blue', name: 'Blue Lightning', type: 'car', price: 1500, rarity: 'rare', stats: { speed: 7, acceleration: 6 } },

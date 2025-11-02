@@ -46,7 +46,7 @@ export const setupRaceHandlers = (io: Server) => {
     }
 
     // Handle player progress updates
-    socket.on('update-progress', (data: { progress: number; wpm: number; errors: number }) => {
+    socket.on('update-progress', (data: { progress: number; wpm: number; errors: number }): void => {
       const player = lobby.players.get(socket.id);
       if (player && lobby.state === 'racing') {
         player.progress = data.progress;
@@ -75,7 +75,7 @@ export const setupRaceHandlers = (io: Server) => {
     });
 
     // Handle disconnection
-    socket.on('disconnect', () => {
+    socket.on('disconnect', (): void => {
       console.log(`Player disconnected: ${socket.user?.username}`);
       lobby.players.delete(socket.id);
 
@@ -95,7 +95,7 @@ export const setupRaceHandlers = (io: Server) => {
   });
 };
 
-const emitWaitingState = (io: Server) => {
+const emitWaitingState = (io: Server): void => {
   const playersList = Array.from(lobby.players.values()).map(p => ({
     username: p.username,
     socketId: p.socketId
@@ -107,7 +107,7 @@ const emitWaitingState = (io: Server) => {
   });
 };
 
-const startCountdown = (io: Server) => {
+const startCountdown = (io: Server): void => {
   lobby.state = 'countdown';
   lobby.countdownEndsAt = Date.now() + COUNTDOWN_DURATION;
 
@@ -122,7 +122,7 @@ const startCountdown = (io: Server) => {
   emitWaitingState(io);
 };
 
-const startRace = (io: Server) => {
+const startRace = (io: Server): void => {
   lobby.state = 'racing';
   const raceText = getRandomRaceText();
   const raceId = uuidv4();
@@ -140,7 +140,7 @@ const startRace = (io: Server) => {
   io.emit('race-started', lobby.raceData);
 };
 
-const checkRaceCompletion = async (io: Server) => {
+const checkRaceCompletion = async (io: Server): Promise<void> => {
   const allFinished = Array.from(lobby.players.values()).every(p => p.finished);
   const activePlayers = Array.from(lobby.players.values());
 
@@ -155,7 +155,7 @@ const checkRaceCompletion = async (io: Server) => {
   }
 };
 
-const resetLobby = (io: Server) => {
+const resetLobby = (io: Server): void => {
   lobby.state = 'waiting';
   lobby.countdownEndsAt = undefined;
   lobby.raceData = undefined;

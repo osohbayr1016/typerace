@@ -1,9 +1,14 @@
+interface RewardResult {
+  coins: number;
+  exp: number;
+}
+
 export const calculateRewards = (
   wpm: number,
   accuracy: number,
   placement: number,
   textLength: number
-) => {
+): RewardResult => {
   // Base rewards
   let coins = Math.floor(wpm * 2);
   let exp = Math.floor(wpm * 3);

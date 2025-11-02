@@ -33,9 +33,10 @@ export const purchase = async (req: AuthRequest, res: Response): Promise<void> =
       item: result.item,
       newBalance: result.newBalance
     });
-  } catch (error: any) {
+  } catch (error) {
     console.error('Purchase error:', error);
-    res.status(400).json({ error: error.message || 'Failed to purchase item' });
+    const errorMessage = error instanceof Error ? error.message : 'Failed to purchase item';
+    res.status(400).json({ error: errorMessage });
   }
 };
 

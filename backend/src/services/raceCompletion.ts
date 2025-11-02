@@ -1,18 +1,24 @@
 import { Server } from 'socket.io';
 import { AuthSocket } from '../config/socket';
-import { Player } from '../types';
+import { Player, RaceData } from '../types';
 import { calculateRewards, calculateLevel } from '../utils/rewardCalculator';
 import { User } from '../models/User';
+
+interface PlayerFinishedData {
+  progress: number;
+  wpm: number;
+  errors: number;
+}
 
 export const handlePlayerFinished = async (
   io: Server,
   socket: AuthSocket,
   player: Player,
-  data: { progress: number; wpm: number; errors: number },
-  raceData: any,
+  data: PlayerFinishedData,
+  raceData: RaceData | undefined,
   raceStartTime: number,
   checkCompletion: () => Promise<void>
-) => {
+): Promise<void> => {
   player.finished = true;
   player.finishTime = Date.now() - raceStartTime;
 
@@ -50,8 +56,17 @@ export const handlePlayerFinished = async (
   await checkCompletion();
 };
 
-export const finishRace = async (io: Server, players: Map<string, Player>) => {
-  const results = Array.from(players.values())
+interface RaceResult {
+  username: string;
+  userId?: string;
+  socketId: string;
+  wpm: number;
+  placement: number;
+  finishTime: number;
+}
+
+export const finishRace = async (io: Server, players: Map<string, Player>): Promise<RaceResult[]> => {
+  const results: RaceResult[] = Array.from(players.values())
     .filter(p => p.finished)
     .sort((a, b) => (a.finishTime || 0) - (b.finishTime || 0))
     .map((player, index) => ({
