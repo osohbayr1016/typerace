@@ -1,8 +1,7 @@
 import { Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { AuthRequest } from '../types';
-
-const JWT_SECRET = process.env.JWT_SECRET || 'fallback-secret-key';
+import { env } from '../config/env';
 
 export const authenticateToken = async (
   req: AuthRequest,
@@ -17,7 +16,7 @@ export const authenticateToken = async (
       return;
     }
 
-    const decoded = jwt.verify(token, JWT_SECRET) as {
+    const decoded = jwt.verify(token, env.JWT_SECRET) as {
       id: string;
       username: string;
       email: string;
@@ -39,7 +38,7 @@ export const optionalAuth = async (
     const token = req.cookies.auth_token;
 
     if (token) {
-      const decoded = jwt.verify(token, JWT_SECRET) as {
+      const decoded = jwt.verify(token, env.JWT_SECRET) as {
         id: string;
         username: string;
         email: string;

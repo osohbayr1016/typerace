@@ -2,18 +2,24 @@ import { Server as HTTPServer } from 'http';
 import { Server, Socket } from 'socket.io';
 import jwt from 'jsonwebtoken';
 import { SocketUser } from '../types';
-
-const JWT_SECRET = process.env.JWT_SECRET || 'fallback-secret-key';
-const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
+import { env, getAllowedOrigins } from './env';
 
 export interface AuthSocket extends Socket {
   user?: SocketUser;
 }
 
 export const setupSocketIO = (httpServer: HTTPServer): Server => {
+  const allowedOrigins = getAllowedOrigins();
+  
   const io = new Server(httpServer, {
     cors: {
-      origin: FRONTEND_URL,
+      origin: (origin, callback) => {
+        if (!origin || allowedOrigins.includes(origin) || !env.isProduction) {
+          callback(null, true);
+        } else {
+          callback(new Error('Not allowed by CORS'));
+        }
+      },
       credentials: true,
       methods: ['GET', 'POST']
     }
@@ -25,7 +31,7 @@ export const setupSocketIO = (httpServer: HTTPServer): Server => {
       const token = socket.handshake.auth.token;
 
       if (token) {
-        const decoded = jwt.verify(token, JWT_SECRET) as {
+        const decoded = jwt.verify(token, env.JWT_SECRET) as {
           id: string;
           username: string;
           email: string;

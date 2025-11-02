@@ -2,7 +2,6 @@ import express from 'express';
 import { createServer } from 'http';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
-import dotenv from 'dotenv';
 import { connectDatabase } from './config/database';
 import { setupSocketIO } from './config/socket';
 import { setupRaceHandlers } from './services/raceService';
@@ -10,18 +9,34 @@ import authRoutes from './routes/authRoutes';
 import shopRoutes from './routes/shopRoutes';
 import inventoryRoutes from './routes/inventoryRoutes';
 import { seedShopItems } from './services/shopService';
-
-dotenv.config();
+import { env, getAllowedOrigins } from './config/env';
 
 const app = express();
 const httpServer = createServer(app);
-const PORT = process.env.PORT || 5000;
-const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
+const PORT = env.PORT;
 
-// Middleware
+// CORS configuration
+const allowedOrigins = getAllowedOrigins();
 app.use(cors({
-  origin: FRONTEND_URL,
-  credentials: true
+  origin: (origin, callback) => {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) {
+      return callback(null, true);
+    }
+    
+    if (allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else if (env.isProduction) {
+      // In production, be strict about origins
+      callback(new Error('Not allowed by CORS'));
+    } else {
+      // In development, allow all origins
+      callback(null, true);
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
 app.use(express.json());
 app.use(cookieParser());
@@ -62,7 +77,8 @@ const startServer = async () => {
     httpServer.listen(PORT, () => {
       console.log(`🚀 Server running on port ${PORT}`);
       console.log(`📡 WebSocket server ready`);
-      console.log(`🌐 Frontend URL: ${FRONTEND_URL}`);
+      console.log(`🌐 Environment: ${env.NODE_ENV}`);
+      console.log(`🌐 Allowed origins: ${allowedOrigins.join(', ')}`);
     });
   } catch (error) {
     console.error('Failed to start server:', error);
@@ -73,11 +89,20 @@ const startServer = async () => {
 startServer();
 
 // Graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('SIGTERM received, shutting down gracefully...');
+const gracefulShutdown = (signal: string) => {
+  console.log(`${signal} received, shutting down gracefully...`);
   httpServer.close(() => {
     console.log('Server closed');
     process.exit(0);
   });
-});
+  
+  // Force close after 10 seconds
+  setTimeout(() => {
+    console.error('Forcing shutdown after timeout');
+    process.exit(1);
+  }, 10000);
+};
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 

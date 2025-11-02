@@ -3,8 +3,8 @@ import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import { User } from '../models/User';
 import { AuthRequest } from '../types';
+import { env } from '../config/env';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'fallback-secret-key';
 const COOKIE_MAX_AGE = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 export const signup = async (req: AuthRequest, res: Response): Promise<void> => {
@@ -44,15 +44,15 @@ export const signup = async (req: AuthRequest, res: Response): Promise<void> => 
 
     const token = jwt.sign(
       { id: user._id, username: user.username, email: user.email },
-      JWT_SECRET,
+      env.JWT_SECRET,
       { expiresIn: '7d' }
     );
 
     res.cookie('auth_token', token, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
+      secure: env.isProduction,
       maxAge: COOKIE_MAX_AGE,
-      sameSite: 'lax'
+      sameSite: env.isProduction ? 'none' : 'lax'
     });
 
     res.status(201).json({
@@ -98,15 +98,15 @@ export const login = async (req: AuthRequest, res: Response): Promise<void> => {
 
     const token = jwt.sign(
       { id: user._id, username: user.username, email: user.email },
-      JWT_SECRET,
+      env.JWT_SECRET,
       { expiresIn: '7d' }
     );
 
     res.cookie('auth_token', token, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
+      secure: env.isProduction,
       maxAge: COOKIE_MAX_AGE,
-      sameSite: 'lax'
+      sameSite: env.isProduction ? 'none' : 'lax'
     });
 
     res.json({
@@ -128,7 +128,11 @@ export const login = async (req: AuthRequest, res: Response): Promise<void> => {
 };
 
 export const logout = async (req: AuthRequest, res: Response): Promise<void> => {
-  res.clearCookie('auth_token');
+  res.clearCookie('auth_token', {
+    httpOnly: true,
+    secure: env.isProduction,
+    sameSite: env.isProduction ? 'none' : 'lax'
+  });
   res.json({ message: 'Logged out successfully' });
 };
 
