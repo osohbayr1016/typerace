@@ -6,9 +6,10 @@ import { env, getAllowedOrigins } from './env';
 
 // Extend Socket interface with user property
 // Socket.io Socket already has all properties (id, handshake, emit, on, etc.)
-export interface AuthSocket extends Socket {
+// Using type intersection to ensure all Socket properties are available
+export type AuthSocket = Socket & {
   user?: SocketUser;
-}
+};
 
 export const setupSocketIO = (httpServer: HTTPServer): Server => {
   const allowedOrigins = getAllowedOrigins();
