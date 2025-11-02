@@ -71,6 +71,7 @@ setupRaceHandlers(io);
 // Start server
 const startServer = async () => {
   try {
+    console.log('🚀 Starting server...');
     await connectDatabase();
     await seedShopItems();
     
@@ -81,7 +82,9 @@ const startServer = async () => {
       console.log(`🌐 Allowed origins: ${allowedOrigins.join(', ')}`);
     });
   } catch (error) {
-    console.error('Failed to start server:', error);
+    console.error('❌ Failed to start server:');
+    console.error('   Error:', error instanceof Error ? error.message : error);
+    console.error('   Stack:', error instanceof Error ? error.stack : 'No stack trace');
     process.exit(1);
   }
 };

@@ -4,6 +4,14 @@ dotenv.config();
 
 const isProduction = process.env.NODE_ENV === 'production';
 
+// Log environment loading status for debugging
+console.log('🔍 Environment check:');
+console.log(`   NODE_ENV: ${process.env.NODE_ENV || 'not set'}`);
+console.log(`   PORT: ${process.env.PORT || 'not set (will use 5000)'}`);
+console.log(`   MONGODB_URI: ${process.env.MONGODB_URI ? '✅ set' : '❌ not set'}`);
+console.log(`   JWT_SECRET: ${process.env.JWT_SECRET ? '✅ set' : '❌ not set'}`);
+console.log(`   FRONTEND_URL: ${process.env.FRONTEND_URL || 'not set (will use localhost:3000)'}`);
+
 // Validate required environment variables
 const requiredEnvVars = {
   MONGODB_URI: process.env.MONGODB_URI,
@@ -20,6 +28,11 @@ if (isProduction) {
     missingVars.forEach(varName => {
       console.error(`   - ${varName}`);
     });
+    console.error('💡 Please set these variables in your Render dashboard:');
+    console.error('   1. Go to your Render dashboard');
+    console.error('   2. Select your service');
+    console.error('   3. Go to "Environment" tab');
+    console.error('   4. Add the missing variables');
     process.exit(1);
   }
 
@@ -27,6 +40,8 @@ if (isProduction) {
   if (process.env.JWT_SECRET === 'fallback-secret-key' || 
       process.env.JWT_SECRET === undefined) {
     console.error('❌ JWT_SECRET must be set to a secure value in production');
+    console.error('💡 Generate a secure JWT_SECRET using:');
+    console.error('   node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64\'))"');
     process.exit(1);
   }
 }
